@@ -1,4 +1,4 @@
-﻿from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
@@ -18,7 +18,6 @@ from app.core.exceptions import (
 from app.core.logging import get_logger, setup_logging
 from app.core.middleware import RequestCorrelationMiddleware
 from app.core.redis import close_redis_client, get_redis_client
-from app.core.storage import get_storage
 
 settings = get_settings()
 logger = get_logger("main")
@@ -37,25 +36,15 @@ async def lifespan(app: FastAPI):
 
     # Initialize Redis connection pool
     try:
-        redis = get_redis_client()
+        get_redis_client()
         logger.info("Redis client initialized.")
     except Exception as exc:
         logger.warning("Redis initialization deferred", error=str(exc))
 
-    # Ensure MinIO bucket exists
-    try:
-        storage = get_storage()
-        storage.ensure_bucket_exists()
-    except Exception as exc:
-        logger.warning("Storage bucket setup deferred", error=str(exc))
-
     yield
 
     logger.info("Shutting down DevVision AI API...")
-    # Close Redis client
     await close_redis_client()
-
-    # Dispose database engine pool
     await engine.dispose()
     logger.info("Database connection engine disposed.")
 

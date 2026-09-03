@@ -1,4 +1,5 @@
-﻿from datetime import datetime, timezone
+import asyncio
+from datetime import datetime, timezone
 from fastapi import APIRouter, Response, status
 from pydantic import BaseModel
 from app.core.database import check_db_health, check_pgvector_installed
@@ -49,10 +50,13 @@ async def health_live() -> LiveResponse:
     description="Deep health check verifying connectivity to PostgreSQL, pgvector, Redis, and MinIO/S3.",
 )
 async def health_ready(response: Response) -> ReadyResponse:
-    db_ok = await check_db_health()
+    # Run checks concurrently without blocking event loop
+    db_task = asyncio.create_task(check_db_health())
+    redis_task = asyncio.create_task(check_redis_health())
+    storage_task = asyncio.to_thread(get_storage().check_health)
+
+    db_ok, redis_ok, storage_ok = await asyncio.gather(db_task, redis_task, storage_task)
     pgvector_ok = await check_pgvector_installed() if db_ok else False
-    redis_ok = await check_redis_health()
-    storage_ok = get_storage().check_health()
 
     checks = DependencyChecks(
         database="healthy" if db_ok else "unhealthy",

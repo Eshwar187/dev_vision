@@ -1,7 +1,7 @@
-﻿from typing import Any, Dict, Optional, Protocol
+from typing import Any, Dict, Optional, Protocol
 import boto3
 from botocore.client import Config
-from botocore.exceptions import ClientError
+from botocore.exceptions import ClientError, EndpointConnectionError
 from app.core.config import get_settings
 from app.core.logging import get_logger
 
@@ -40,7 +40,13 @@ class S3StorageService:
             aws_secret_access_key=settings.S3_SECRET_KEY,
             region_name=settings.S3_REGION,
             use_ssl=settings.S3_SECURE,
-            config=Config(signature_version="s3v4", s3={"addressing_style": "path"}),
+            config=Config(
+                signature_version="s3v4",
+                s3={"addressing_style": "path"},
+                connect_timeout=2,
+                read_timeout=2,
+                retries={"max_attempts": 1},
+            ),
         )
 
     def check_health(self) -> bool:
@@ -51,12 +57,11 @@ class S3StorageService:
         except ClientError as e:
             error_code = e.response.get("Error", {}).get("Code")
             if error_code in ("404", "NoSuchBucket"):
-                # Bucket doesn't exist, but endpoint is accessible
                 return self.ensure_bucket_exists()
-            logger.error("MinIO/S3 health check failed", error=str(e))
+            logger.warning("MinIO/S3 health check rejected", error=str(e))
             return False
-        except Exception as exc:
-            logger.error("MinIO/S3 connection error", error=str(exc))
+        except (EndpointConnectionError, Exception) as exc:
+            logger.warning("MinIO/S3 endpoint unreachable", error=str(exc))
             return False
 
     def ensure_bucket_exists(self) -> bool:
@@ -70,11 +75,13 @@ class S3StorageService:
                 logger.info("Created storage bucket", bucket=self.bucket_name)
                 return True
             except Exception as e:
-                logger.error("Failed to create storage bucket", error=str(e), bucket=self.bucket_name)
+                logger.warning("Failed to create storage bucket", error=str(e), bucket=self.bucket_name)
                 return False
+        except Exception as e:
+            logger.warning("Storage service unreachable for bucket creation", error=str(e))
+            return False
 
     def upload_bytes(self, key: str, data: bytes, content_type: str = "application/octet-stream") -> str:
-        """Uploads raw bytes to S3 and returns the object key."""
         self.client.put_object(
             Bucket=self.bucket_name,
             Key=key,
@@ -84,12 +91,10 @@ class S3StorageService:
         return key
 
     def get_object_bytes(self, key: str) -> bytes:
-        """Retrieves raw bytes of an object from S3."""
         response = self.client.get_object(Bucket=self.bucket_name, Key=key)
         return response["Body"].read()
 
     def generate_presigned_url(self, key: str, expiration: int = 900, method: str = "get_object") -> str:
-        """Generates a temporary presigned URL for secure direct client access."""
         return self.client.generate_presigned_url(
             ClientMethod=method,
             Params={"Bucket": self.bucket_name, "Key": key},
@@ -101,7 +106,6 @@ _storage_instance: Optional[S3StorageService] = None
 
 
 def get_storage() -> S3StorageService:
-    """Returns singleton S3 storage service instance."""
     global _storage_instance
     if _storage_instance is None:
         _storage_instance = S3StorageService()
