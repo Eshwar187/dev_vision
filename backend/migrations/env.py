@@ -1,4 +1,4 @@
-﻿import asyncio
+import asyncio
 from logging.config import fileConfig
 from alembic import context
 from sqlalchemy import pool
@@ -6,6 +6,10 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 from app.core.config import get_settings
 from app.core.database import Base
+
+# Import all models so that Base.metadata contains all tables
+import app.modules.identity.models  # noqa: F401
+import app.modules.workspaces.models  # noqa: F401
 
 config = context.config
 

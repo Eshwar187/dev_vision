@@ -21,16 +21,19 @@ dev-vision/
 ├── docs/architecture/          # Architecture Decision Records (ADRs)
 ├── backend/                    # FastAPI Modular Monolith
 │   ├── app/
-│   │   ├── api/v1/             # Versioned REST endpoints (/health, /system)
-│   │   ├── core/               # Cross-cutting: config, database, logging, redis, storage
+│   │   ├── api/                # Reusable dependencies (auth, csrf, rbac)
+│   │   │   └── v1/             # Versioned REST endpoints (/auth, /workspaces, /health, /system)
+│   │   ├── core/               # Cross-cutting: config, database, security, logging, redis, storage
 │   │   ├── modules/            # Isolated domain packages
+│   │   │   ├── identity/       # Users, Sessions, Argon2id, Anti-enumeration
+│   │   │   └── workspaces/     # Workspaces, Memberships, RBAC, Ownership transfer
 │   │   └── main.py             # ASGI factory, lifespan, CORS, middleware
 │   ├── migrations/             # Alembic migrations (async SQLAlchemy)
-│   └── tests/                  # Pytest unit & integration suite
+│   └── tests/                  # Pytest unit & integration suite (27 tests)
 ├── frontend/                   # SvelteKit Application
 │   ├── src/
-│   │   ├── lib/                # API client, components, utilities
-│   │   └── routes/             # SvelteKit pages and layouts
+│   │   ├── lib/                # API client with CSRF double-submit, stores, types
+│   │   └── routes/             # SvelteKit pages: (auth)/login, (auth)/register, (dashboard)/app, (dashboard)/workspaces
 │   └── static/
 ├── docker-compose.yml          # Complete multi-container local stack
 ├── .env.example                # Canonical environment template
@@ -39,9 +42,38 @@ dev-vision/
 
 ---
 
+## 🔐 Phase 1 Security Architecture
+
+### 1. PostgreSQL-Backed Opaque Sessions
+- **Session Tokens**: 32-byte cryptographically secure random tokens (`secrets.token_urlsafe(32)`).
+- **Database Storage**: Tokens are stored strictly as SHA-256 digests (`token_hash`) in the `sessions` table. Raw tokens never enter database logs or tables.
+- **Session Lifetime**: Deterministic fixed 7-day lifetime (`SESSION_MAX_AGE_SECONDS=604800`). Expired sessions are lazily purged upon access.
+- **Session Transmission**: Sent exclusively via an `HttpOnly`, `SameSite=Lax`, `Path=/`, `Secure` (in production) cookie named `devvision_session`. JavaScript cannot access session tokens.
+
+### 2. Explicit Double-Submit CSRF Protection
+- **CSRF Token**: 32-byte token issued in a readable cookie (`devvision_csrf`).
+- **Header Injection**: SvelteKit API client automatically extracts `devvision_csrf` and injects `X-CSRF-Token` into all state-changing requests (`POST`, `PUT`, `PATCH`, `DELETE`).
+- **Constant-Time Verification**: Backend verifies header token matches cookie token using `hmac.compare_digest`. Safe methods (`GET`, `HEAD`, `OPTIONS`) are exempt.
+
+### 3. Password Security & Anti-Enumeration
+- **Argon2id**: Memory-hard password hashing via `argon2-cffi` (RFC 9106 recommended parameters).
+- **Password Policy**: Minimum 12 characters, maximum 128 characters. UTF-8 strings with spaces allowed; no arbitrary composition rules.
+- **Login Timing Defense**: Dummy Argon2id verification executes when an email does not exist, equalizing server response latency to defend against user enumeration.
+- **Registration Defense**: Generic registration responses prevent malicious enumeration of pre-registered emails.
+
+### 4. Multi-Tenant Workspaces & RBAC
+- **Tenant Boundary**: Workspaces isolate all downstream projects, documents, codebases, and configurations.
+- **Roles**: `owner`, `admin`, and `member`.
+- **Invariants Enforced**:
+  - **Last-Owner Protection**: Sole owners cannot be deleted, demoted, or removed.
+  - **Ownership Transfer**: Dedicated `POST /workspaces/{id}/transfer-ownership` atomically promotes the new owner and demotes the existing owner to `admin`.
+  - **IDOR Defense**: Accessing a non-member workspace returns `404 Not Found` rather than `403 Forbidden` to prevent workspace existence enumeration.
+
+---
+
 ## 🏛️ Architecture Decision Records (ADRs)
 
-Key Phase 0 architectural decisions are documented under `docs/architecture/`:
+Key architectural decisions are documented under `docs/architecture/`:
 
 1. **[ADR 0001: Modular Monolith Architecture](docs/architecture/0001-modular-monolith.md)** — Rejection of premature microservices in favor of high-velocity domain modules.
 2. **[ADR 0002: SvelteKit and FastAPI Separation](docs/architecture/0002-sveltekit-fastapi-separation.md)** — High-performance Svelte reactivity coupled with Python's AI/ML ecosystem.
@@ -94,17 +126,20 @@ Key Phase 0 architectural decisions are documented under `docs/architecture/`:
 ```bash
 cd backend
 
-# Create virtual environment
+# Create virtual environment with uv
 uv venv --python 3.11 .venv
 
 # Activate virtual environment (Windows PowerShell)
-.venv\Scripts\activate
+.\.venv\Scripts\activate
 
 # Install dependencies
 uv pip install -r requirements.txt
 
+# Run migrations
+alembic upgrade head
+
 # Run backend server
-python -m uvicorn app.main:app --reload --port 8000
+uvicorn app.main:app --reload --port 8000
 ```
 
 #### 2. Frontend Setup
@@ -125,7 +160,7 @@ npm run dev -- --port 5173
 
 ### Run Backend Test Suite
 ```bash
-# From repository root
+# Run all unit and integration tests from repository root
 backend\.venv\Scripts\pytest.exe backend/tests -v
 ```
 
@@ -138,8 +173,27 @@ npm run build
 
 ---
 
-## 🛡️ Health Endpoints
+## 🛡️ API Endpoints Summary
 
-- `GET /health/live`: Shallow liveness probe returning process status and correlation ID.
+### Authentication (`/api/v1/auth`)
+- `POST /register`: Register user and create default personal workspace.
+- `POST /login`: Verify credentials, issue `devvision_session` and `devvision_csrf` cookies.
+- `POST /logout`: Revoke session in database, clear cookies.
+- `GET /me`: Return authenticated user profile.
+
+### Workspaces (`/api/v1/workspaces`)
+- `POST /`: Create workspace and assign creator as `owner`.
+- `GET /`: List all workspaces the current user is a member of.
+- `GET /{id}`: Retrieve workspace details and member count.
+- `PATCH /{id}`: Update workspace name (`admin` or `owner`).
+- `DELETE /{id}`: Delete workspace (`owner` only; cascade deletes memberships).
+- `GET /{id}/members`: List all workspace members and their roles.
+- `POST /{id}/members`: Add registered user by email (`admin` or `owner`).
+- `PATCH /{id}/members/{user_id}`: Update member role (`owner` only).
+- `DELETE /{id}/members/{user_id}`: Remove member or leave workspace.
+- `POST /{id}/transfer-ownership`: Transfer sole workspace ownership to another member (`owner` only).
+
+### Diagnostics & Probes
+- `GET /health/live`: Shallow liveness probe.
 - `GET /health/ready`: Deep readiness probe checking PostgreSQL, pgvector, Redis, and MinIO connectivity.
-- `GET /api/v1/system/info`: Metadata about current runtime, version, and environment.
+- `GET /api/v1/system/info`: Current runtime metadata and API version.

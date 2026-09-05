@@ -1,4 +1,4 @@
-﻿from functools import lru_cache
+from functools import lru_cache
 from typing import List, Union
 from pydantic import AnyHttpUrl, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -65,6 +65,21 @@ class Settings(BaseSettings):
     S3_BUCKET_NAME: str = "devvision-local"
     S3_REGION: str = "us-east-1"
     S3_SECURE: bool = False
+
+    # Authentication & Sessions
+    SESSION_COOKIE_NAME: str = "devvision_session"
+    CSRF_COOKIE_NAME: str = "devvision_csrf"
+    SESSION_MAX_AGE_SECONDS: int = 60 * 60 * 24 * 7  # 7 days fixed
+    COOKIE_SECURE: bool = False  # Set to True in production
+    COOKIE_SAMESITE: str = "lax"
+
+    @property
+    def is_production(self) -> bool:
+        return self.ENVIRONMENT.lower() == "production"
+
+    @property
+    def cookie_secure_effective(self) -> bool:
+        return self.COOKIE_SECURE or self.is_production
 
     # Logging
     LOG_LEVEL: str = "INFO"

@@ -1,8 +1,12 @@
-﻿from fastapi import APIRouter
-from app.api.v1.endpoints import health, system
+from fastapi import APIRouter
+from app.api.v1.endpoints import auth, health, system, workspaces
 
 api_v1_router = APIRouter()
 
-# Register health & system endpoints
+# Register Phase 0 endpoints
 api_v1_router.include_router(health.router)
 api_v1_router.include_router(system.router)
+
+# Register Phase 1 endpoints
+api_v1_router.include_router(auth.router)
+api_v1_router.include_router(workspaces.router)
