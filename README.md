@@ -22,18 +22,19 @@ dev-vision/
 ├── backend/                    # FastAPI Modular Monolith
 │   ├── app/
 │   │   ├── api/                # Reusable dependencies (auth, csrf, rbac)
-│   │   │   └── v1/             # Versioned REST endpoints (/auth, /workspaces, /health, /system)
+│   │   │   └── v1/             # Versioned REST endpoints (/auth, /workspaces, /documents, /health, /system)
 │   │   ├── core/               # Cross-cutting: config, database, security, logging, redis, storage
 │   │   ├── modules/            # Isolated domain packages
 │   │   │   ├── identity/       # Users, Sessions, Argon2id, Anti-enumeration
-│   │   │   └── workspaces/     # Workspaces, Memberships, RBAC, Ownership transfer
+│   │   │   ├── workspaces/     # Workspaces, Memberships, RBAC, Ownership transfer
+│   │   │   └── documents/      # Validation, S3 storage, Checksums, Dedup, Cursor pagination
 │   │   └── main.py             # ASGI factory, lifespan, CORS, middleware
 │   ├── migrations/             # Alembic migrations (async SQLAlchemy)
-│   └── tests/                  # Pytest unit & integration suite (27 tests)
+│   └── tests/                  # Pytest unit & integration suite (53 tests)
 ├── frontend/                   # SvelteKit Application
 │   ├── src/
 │   │   ├── lib/                # API client with CSRF double-submit, stores, types
-│   │   └── routes/             # SvelteKit pages: (auth)/login, (auth)/register, (dashboard)/app, (dashboard)/workspaces
+│   │   └── routes/             # SvelteKit pages: (auth)/login, (auth)/register, (dashboard)/app, (dashboard)/workspaces, (dashboard)/documents
 │   └── static/
 ├── docker-compose.yml          # Complete multi-container local stack
 ├── .env.example                # Canonical environment template
@@ -68,6 +69,43 @@ dev-vision/
   - **Last-Owner Protection**: Sole owners cannot be deleted, demoted, or removed.
   - **Ownership Transfer**: Dedicated `POST /workspaces/{id}/transfer-ownership` atomically promotes the new owner and demotes the existing owner to `admin`.
   - **IDOR Defense**: Accessing a non-member workspace returns `404 Not Found` rather than `403 Forbidden` to prevent workspace existence enumeration.
+
+---
+
+## 📄 Phase 2 Document Management Architecture
+
+### 1. Supported Document Policy & Validation
+- **Supported Formats**:
+  - **PDF (`.pdf`)**: Header signature verification (`%PDF-`). Structural parsing and font stream safety deferred to Phase 3. Never executed.
+  - **Plain Text (`.txt`)** and **Markdown (`.md`)**: Valid UTF-8 encoding, rejection of prohibited NUL bytes (`\x00`).
+  - **DOCX (`.docx`)**: Standard library `zipfile` structural audit verifying `[Content_Types].xml`, maximum 500 entries, cumulative uncompressed size <= 100 MB, compression ratio <= 10:1, rejection of encrypted entries, archive path traversal (`../`), and embedded executable binaries.
+- **Hard Size Ceilings**: Maximum 20 MB ceiling for PDF and DOCX; 10 MB ceiling for TXT and Markdown.
+- **Unbuffered Stream Metering**: Content-Length is checked for early rejection, but the actual consumed stream is authoritative. If stream consumption exceeds the limit, processing aborts immediately (`HTTP 413 Payload Too Large`).
+
+### 2. Filename Security & Normalization
+- Normalization strips both Unix (`/`) and Windows (`\`) slashes.
+- Unicode NFKC normalization, removal of NUL bytes, ASCII controls, CR/LF, zero-width markers, and bidirectional override characters (e.g. `\u202e`).
+- Multi-dot filenames (e.g. `report.v2.pdf`) are permitted based strictly on the final sanitized extension.
+- Maximum display filename length is truncated to 200 characters while preserving extension.
+
+### 3. Storage & Object Key Strategy
+- **Opaque Storage Keys**: The original filename is stored strictly as metadata. The MinIO/S3 object key is server-generated:
+  `workspaces/{workspace_id}/documents/{document_id}/{checksum_prefix}/{document_id}.{sanitized_ext}`
+- **Private S3 Bucket**: S3 is never exposed publicly; downloads are proxied through authenticated FastAPI streaming endpoints with `X-Content-Type-Options: nosniff`.
+
+### 4. Database-Level Duplicate Protection
+- **`UNIQUE (workspace_id, checksum)` Constraint**: Prevents duplicate document contents within the same workspace at the database engine level.
+- **Fast Pre-Check**: Application SELECT skips S3 network transfer if duplicate already exists.
+- **Race Condition Handling**: Concurrent identical uploads trigger `IntegrityError`, roll back DB, and execute an immediate compensating S3 deletion before returning `HTTP 409 Conflict` (`DUPLICATE_DOCUMENT`).
+
+### 5. S3-First Deletion
+- Document deletion invokes `storage.delete_object(object_key)` first.
+- If S3 deletion fails, the DB record is preserved and `HTTP 502 Bad Gateway` is returned, preventing ghost records.
+- If S3 confirms deletion (or key is already absent), the PostgreSQL record is deleted.
+
+### 6. Keyset Cursor Pagination
+- Stable ordering: `created_at DESC, id DESC`.
+- Response format: `{ "items": [...], "next_cursor": "..." }`. No expensive or drifting `total` count is computed.
 
 ---
 
@@ -192,6 +230,13 @@ npm run build
 - `PATCH /{id}/members/{user_id}`: Update member role (`owner` only).
 - `DELETE /{id}/members/{user_id}`: Remove member or leave workspace.
 - `POST /{id}/transfer-ownership`: Transfer sole workspace ownership to another member (`owner` only).
+
+### Documents (`/api/v1/workspaces/{workspace_id}/documents`)
+- `POST /`: Upload document with size metering, signature inspection, SHA-256 deduplication, and S3-first compensating rollback.
+- `GET /`: List workspace documents with stable keyset cursor pagination (`created_at DESC, id DESC`).
+- `GET /{id}`: Retrieve document metadata.
+- `GET /{id}/download`: Stream binary document file from S3 through authenticated FastAPI proxy.
+- `DELETE /{id}`: Delete document using S3-first deletion flow and RBAC rules (owner/admin deletes any, member deletes own).
 
 ### Diagnostics & Probes
 - `GET /health/live`: Shallow liveness probe.

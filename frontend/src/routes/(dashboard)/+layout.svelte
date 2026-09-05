@@ -78,6 +78,7 @@
       <nav class="flex items-center gap-3 text-slate-300">
         <a href="/app" class="hover:text-cyan-400 transition-colors">Dashboard</a>
         <a href="/workspaces" class="hover:text-cyan-400 transition-colors">Workspaces</a>
+        <a href="/documents" class="hover:text-cyan-400 transition-colors">Documents</a>
         <a href="/" class="text-slate-400 hover:text-slate-200 transition-colors">Diagnostics</a>
       </nav>
 

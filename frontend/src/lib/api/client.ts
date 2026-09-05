@@ -7,6 +7,9 @@ import type {
   LoginResponse,
   LogoutResponse,
   ErrorEnvelope,
+  DocumentItem,
+  DocumentListResponse,
+  DocumentDeleteResponse,
 } from "./types";
 
 export interface LiveStatus {
@@ -258,6 +261,158 @@ export class ApiClient {
       {
         method: "POST",
         body: JSON.stringify({ new_owner_user_id: newOwnerUserId }),
+      }
+    );
+  }
+
+  // --- Phase 2: Document Management Endpoints ---
+  async uploadDocument(
+    workspaceId: string,
+    file: File
+  ): Promise<ProbeResult<DocumentItem>> {
+    const formData = new FormData();
+    formData.append("file", file);
+
+    const headers: Record<string, string> = {};
+    const csrfToken = getCsrfCookie();
+    if (csrfToken) {
+      headers["X-CSRF-Token"] = csrfToken;
+    }
+
+    const start = performance.now();
+    try {
+      const res = await fetch(
+        `${this.baseUrl}/api/v1/workspaces/${workspaceId}/documents`,
+        {
+          method: "POST",
+          headers,
+          body: formData,
+          credentials: "include",
+        }
+      );
+      const latencyMs = Math.round(performance.now() - start);
+      const requestId = res.headers.get("x-request-id");
+
+      if (!res.ok) {
+        const errorEnvelope: ErrorEnvelope | null = await res.json().catch(() => null);
+        return {
+          success: false,
+          data: null,
+          error: errorEnvelope?.error?.message || `HTTP error: ${res.status}`,
+          errorCode: errorEnvelope?.error?.code || `HTTP_${res.status}`,
+          latencyMs,
+          requestId,
+        };
+      }
+
+      const data: DocumentItem = await res.json();
+      return {
+        success: true,
+        data,
+        error: null,
+        latencyMs,
+        requestId,
+      };
+    } catch (err: any) {
+      return {
+        success: false,
+        data: null,
+        error: err?.message || "Upload failed due to network error.",
+        latencyMs: Math.round(performance.now() - start),
+        requestId: null,
+      };
+    }
+  }
+
+  async listDocuments(
+    workspaceId: string,
+    limit: number = 20,
+    cursor?: string
+  ): Promise<ProbeResult<DocumentListResponse>> {
+    let url = `/api/v1/workspaces/${workspaceId}/documents?limit=${limit}`;
+    if (cursor) {
+      url += `&cursor=${encodeURIComponent(cursor)}`;
+    }
+    return this.request<DocumentListResponse>(url);
+  }
+
+  async getDocument(
+    workspaceId: string,
+    documentId: string
+  ): Promise<ProbeResult<DocumentItem>> {
+    return this.request<DocumentItem>(
+      `/api/v1/workspaces/${workspaceId}/documents/${documentId}`
+    );
+  }
+
+  async downloadDocument(
+    workspaceId: string,
+    documentId: string,
+    fallbackFilename: string = "download"
+  ): Promise<ProbeResult<Blob>> {
+    const start = performance.now();
+    try {
+      const res = await fetch(
+        `${this.baseUrl}/api/v1/workspaces/${workspaceId}/documents/${documentId}/download`,
+        {
+          method: "GET",
+          credentials: "include",
+        }
+      );
+      const latencyMs = Math.round(performance.now() - start);
+      const requestId = res.headers.get("x-request-id");
+
+      if (!res.ok) {
+        const errorEnvelope: ErrorEnvelope | null = await res.json().catch(() => null);
+        return {
+          success: false,
+          data: null,
+          error: errorEnvelope?.error?.message || `Download failed (${res.status})`,
+          errorCode: errorEnvelope?.error?.code || `HTTP_${res.status}`,
+          latencyMs,
+          requestId,
+        };
+      }
+
+      const blob = await res.blob();
+      // Trigger native browser download save
+      if (typeof window !== "undefined" && typeof document !== "undefined") {
+        const blobUrl = window.URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = blobUrl;
+        a.download = fallbackFilename;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        window.URL.revokeObjectURL(blobUrl);
+      }
+
+      return {
+        success: true,
+        data: blob,
+        error: null,
+        latencyMs,
+        requestId,
+      };
+    } catch (err: any) {
+      return {
+        success: false,
+        data: null,
+        error: err?.message || "Failed to download document.",
+        latencyMs: Math.round(performance.now() - start),
+        requestId: null,
+      };
+    }
+  }
+
+  async deleteDocument(
+    workspaceId: string,
+    documentId: string
+  ): Promise<ProbeResult<DocumentDeleteResponse>> {
+    return this.request<DocumentDeleteResponse>(
+      `/api/v1/workspaces/${workspaceId}/documents/${documentId}`,
+      {
+        method: "DELETE",
       }
     );
   }

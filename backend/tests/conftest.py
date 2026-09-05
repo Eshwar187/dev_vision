@@ -9,6 +9,7 @@ from app.main import app as fastapi_app
 # Import models so Base.metadata contains all tables
 import app.modules.identity.models  # noqa: F401
 import app.modules.workspaces.models  # noqa: F401
+import app.modules.documents.models  # noqa: F401
 
 # In-memory SQLite async test database
 test_engine = create_async_engine(

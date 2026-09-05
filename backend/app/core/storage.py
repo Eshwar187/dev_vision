@@ -24,6 +24,15 @@ class StorageService(Protocol):
     def get_object_bytes(self, key: str) -> bytes:
         ...
 
+    def get_object_stream(self, key: str) -> Any:
+        ...
+
+    def delete_object(self, key: str) -> bool:
+        ...
+
+    def object_exists(self, key: str) -> bool:
+        ...
+
     def generate_presigned_url(self, key: str, expiration: int = 900, method: str = "get_object") -> str:
         ...
 
@@ -93,6 +102,38 @@ class S3StorageService:
     def get_object_bytes(self, key: str) -> bytes:
         response = self.client.get_object(Bucket=self.bucket_name, Key=key)
         return response["Body"].read()
+
+    def get_object_stream(self, key: str) -> Any:
+        response = self.client.get_object(Bucket=self.bucket_name, Key=key)
+        return response["Body"]
+
+    def delete_object(self, key: str) -> bool:
+        try:
+            self.client.delete_object(Bucket=self.bucket_name, Key=key)
+            return True
+        except ClientError as e:
+            error_code = e.response.get("Error", {}).get("Code")
+            if error_code in ("404", "NoSuchKey"):
+                return True
+            logger.warning("Failed to delete S3 object", key=key, error=str(e))
+            raise
+        except Exception as exc:
+            logger.warning("Failed to delete S3 object due to unexpected error", key=key, error=str(exc))
+            raise
+
+    def object_exists(self, key: str) -> bool:
+        try:
+            self.client.head_object(Bucket=self.bucket_name, Key=key)
+            return True
+        except ClientError as e:
+            error_code = e.response.get("Error", {}).get("Code")
+            if error_code in ("404", "NoSuchKey"):
+                return False
+            logger.warning("Error checking object existence", key=key, error=str(e))
+            raise
+        except Exception as exc:
+            logger.warning("Unexpected error checking object existence", key=key, error=str(exc))
+            raise
 
     def generate_presigned_url(self, key: str, expiration: int = 900, method: str = "get_object") -> str:
         return self.client.generate_presigned_url(

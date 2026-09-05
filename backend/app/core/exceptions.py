@@ -186,6 +186,58 @@ class OwnershipTransferException(AppException):
         )
 
 
+# ==============================================================================
+# Phase 2: Document Management Exceptions
+# ==============================================================================
+
+class DuplicateDocumentException(AppException):
+    """Raised when a document with identical checksum exists in the workspace."""
+
+    def __init__(self, message: str = "A document with identical content already exists in this workspace.", details: Optional[Dict[str, Any]] = None):
+        super().__init__(
+            message=message,
+            code="DUPLICATE_DOCUMENT",
+            status_code=status.HTTP_409_CONFLICT,
+            details=details,
+        )
+
+
+class DocumentNotFoundException(AppException):
+    """Raised when a document is not found in the target workspace."""
+
+    def __init__(self, message: str = "Document not found in this workspace.", details: Optional[Dict[str, Any]] = None):
+        super().__init__(
+            message=message,
+            code="DOCUMENT_NOT_FOUND",
+            status_code=status.HTTP_404_NOT_FOUND,
+            details=details,
+        )
+
+
+class FileTooLargeException(AppException):
+    """Raised when an uploaded file exceeds the configured size ceiling."""
+
+    def __init__(self, message: str = "File size exceeds the maximum permitted limit.", details: Optional[Dict[str, Any]] = None):
+        super().__init__(
+            message=message,
+            code="FILE_TOO_LARGE",
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            details=details,
+        )
+
+
+class UnsupportedMediaTypeException(AppException):
+    """Raised when a file extension or MIME type is unsupported."""
+
+    def __init__(self, message: str = "Unsupported file type or extension.", details: Optional[Dict[str, Any]] = None):
+        super().__init__(
+            message=message,
+            code="UNSUPPORTED_MEDIA_TYPE",
+            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            details=details,
+        )
+
+
 def build_error_response(
     code: str,
     message: str,

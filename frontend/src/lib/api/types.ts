@@ -56,3 +56,27 @@ export interface ErrorEnvelope {
     request_id: string;
   };
 }
+
+// --- Phase 2: Document Management Types ---
+export interface DocumentItem {
+  id: string;
+  workspace_id: string;
+  original_filename: string;
+  mime_type: string;
+  file_size: number;
+  checksum: string;
+  status: "uploaded" | "processing" | "ready" | "failed";
+  uploaded_by: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DocumentListResponse {
+  items: DocumentItem[];
+  next_cursor: string | null;
+}
+
+export interface DocumentDeleteResponse {
+  status: string;
+  message: string;
+}

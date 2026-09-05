@@ -10,6 +10,7 @@ from app.core.database import Base
 # Import all models so that Base.metadata contains all tables
 import app.modules.identity.models  # noqa: F401
 import app.modules.workspaces.models  # noqa: F401
+import app.modules.documents.models  # noqa: F401
 
 config = context.config
 
