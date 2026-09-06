@@ -80,3 +80,69 @@ export interface DocumentDeleteResponse {
   status: string;
   message: string;
 }
+
+// --- Phase 3: RAG Pipeline Types ---
+export interface RagCitation {
+  citation_marker: number;
+  document_id: string | null;
+  chunk_id: string | null;
+  document_name: string;
+  page_number: number | null;
+  section_heading: string | null;
+  excerpt: string;
+  rank: number;
+  score: number;
+}
+
+export interface RagQueryResponse {
+  query_id: string;
+  query_text: string;
+  answer: string;
+  has_unverified_claims: boolean;
+  processing_time_ms: number;
+  citations: RagCitation[];
+  created_at: string;
+}
+
+export interface RagHistoryItem {
+  id: string;
+  workspace_id: string;
+  user_id: string | null;
+  query_text: string;
+  answer: string;
+  has_unverified_claims: boolean;
+  retrieval_chunks_count: number;
+  processing_time_ms: number;
+  created_at: string;
+  citations: RagCitation[];
+}
+
+export interface RagHistoryResponse {
+  items: RagHistoryItem[];
+  total: number;
+}
+
+export interface DocumentChunk {
+  id: string;
+  chunk_index: number;
+  content: string;
+  page_number: number | null;
+  section_heading: string | null;
+  token_count: number;
+  generation_id: string;
+  created_at: string;
+}
+
+export interface DocumentChunksResponse {
+  document_id: string;
+  active_generation_id: string | null;
+  total_chunks: number;
+  chunks: DocumentChunk[];
+}
+
+export interface ReindexResponse {
+  document_id: string;
+  generation_id: string | null;
+  status: string;
+  message: string;
+}

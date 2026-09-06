@@ -10,6 +10,10 @@ import type {
   DocumentItem,
   DocumentListResponse,
   DocumentDeleteResponse,
+  RagQueryResponse,
+  RagHistoryResponse,
+  DocumentChunksResponse,
+  ReindexResponse,
 } from "./types";
 
 export interface LiveStatus {
@@ -414,6 +418,52 @@ export class ApiClient {
       {
         method: "DELETE",
       }
+    );
+  }
+
+  // --- Phase 3: RAG Pipeline Endpoints ---
+  async executeRagQuery(
+    workspaceId: string,
+    query: string,
+    topK: number = 5
+  ): Promise<ProbeResult<RagQueryResponse>> {
+    return this.request<RagQueryResponse>(
+      `/api/v1/workspaces/${workspaceId}/rag/query`,
+      {
+        method: "POST",
+        body: JSON.stringify({ query, top_k: topK }),
+      }
+    );
+  }
+
+  async getRagHistory(
+    workspaceId: string,
+    limit: number = 50,
+    offset: number = 0
+  ): Promise<ProbeResult<RagHistoryResponse>> {
+    return this.request<RagHistoryResponse>(
+      `/api/v1/workspaces/${workspaceId}/rag/history?limit=${limit}&offset=${offset}`
+    );
+  }
+
+  async reindexDocument(
+    workspaceId: string,
+    documentId: string
+  ): Promise<ProbeResult<ReindexResponse>> {
+    return this.request<ReindexResponse>(
+      `/api/v1/workspaces/${workspaceId}/documents/${documentId}/reindex`,
+      {
+        method: "POST",
+      }
+    );
+  }
+
+  async getDocumentChunks(
+    workspaceId: string,
+    documentId: string
+  ): Promise<ProbeResult<DocumentChunksResponse>> {
+    return this.request<DocumentChunksResponse>(
+      `/api/v1/workspaces/${workspaceId}/documents/${documentId}/chunks`
     );
   }
 }

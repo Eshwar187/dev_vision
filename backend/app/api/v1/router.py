@@ -1,5 +1,5 @@
 from fastapi import APIRouter
-from app.api.v1.endpoints import auth, documents, health, system, workspaces
+from app.api.v1.endpoints import auth, documents, health, rag, system, workspaces
 
 api_v1_router = APIRouter()
 
@@ -13,3 +13,6 @@ api_v1_router.include_router(workspaces.router)
 
 # Register Phase 2 endpoints
 api_v1_router.include_router(documents.router)
+
+# Register Phase 3 endpoints
+api_v1_router.include_router(rag.router)

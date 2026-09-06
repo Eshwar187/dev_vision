@@ -61,6 +61,11 @@ class Document(Base):
         nullable=False,
         default="uploaded",
     )
+    active_generation_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("document_index_generations.id", ondelete="SET NULL", use_alter=True),
+        nullable=True,
+    )
 
     # Relationships
     workspace: Mapped["app.modules.workspaces.models.Workspace"] = relationship(
@@ -68,4 +73,15 @@ class Document(Base):
     )
     uploader: Mapped[Optional["app.modules.identity.models.User"]] = relationship(
         "app.modules.identity.models.User",
+    )
+    generations: Mapped[list["app.modules.rag.models.DocumentIndexGeneration"]] = relationship(
+        "app.modules.rag.models.DocumentIndexGeneration",
+        foreign_keys="app.modules.rag.models.DocumentIndexGeneration.document_id",
+        back_populates="document",
+        cascade="all, delete-orphan",
+    )
+    active_generation: Mapped[Optional["app.modules.rag.models.DocumentIndexGeneration"]] = relationship(
+        "app.modules.rag.models.DocumentIndexGeneration",
+        foreign_keys=[active_generation_id],
+        post_update=True,
     )

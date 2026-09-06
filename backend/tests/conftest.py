@@ -10,6 +10,8 @@ from app.main import app as fastapi_app
 import app.modules.identity.models  # noqa: F401
 import app.modules.workspaces.models  # noqa: F401
 import app.modules.documents.models  # noqa: F401
+import app.modules.rag.models  # noqa: F401
+
 
 # In-memory SQLite async test database
 test_engine = create_async_engine(

@@ -81,6 +81,25 @@ class Settings(BaseSettings):
     def cookie_secure_effective(self) -> bool:
         return self.COOKIE_SECURE or self.is_production
 
+    # RAG & AI Configuration (100% Self-Hosted)
+    EMBEDDING_MODEL_NAME: str = "BAAI/bge-small-en-v1.5"
+    EMBEDDING_MODEL_VERSION: str = "5c38ec7"
+    EMBEDDING_DIMENSION: int = 384
+    
+    RERANKER_ENABLED: bool = True
+    RERANKER_MODEL_NAME: str = "BAAI/bge-reranker-base"
+    RERANKER_MODEL_VERSION: str = "2cb221b"
+    
+    LLM_BACKEND: str = "ollama"  # "ollama" or "llamacpp_server"
+    LLM_BASE_URL: str = "http://localhost:11434"
+    LLM_MODEL: str = "qwen2.5-coder:7b-instruct-q4_K_M"
+    LLM_REQUEST_TIMEOUT_SECONDS: int = 45
+    LLM_MAX_RETRIES: int = 1
+    
+    RAG_HISTORY_RETENTION_DAYS: int = 90
+    RAG_PROCESSING_LEASE_SECONDS: int = 60
+    RAG_PROCESSING_HEARTBEAT_SECONDS: int = 15
+
     # Logging
     LOG_LEVEL: str = "INFO"
     LOG_FORMAT: str = "json"  # "json" or "console"

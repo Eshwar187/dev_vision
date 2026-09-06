@@ -48,7 +48,7 @@
           <div class="flex items-center gap-2">
             <span class="font-semibold tracking-tight text-white text-sm">DevVision AI</span>
             <span class="text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-cyan-950/80 text-cyan-400 border border-cyan-800/50">
-              Phase 1
+              Phase 3
             </span>
           </div>
         </div>
@@ -79,6 +79,7 @@
         <a href="/app" class="hover:text-cyan-400 transition-colors">Dashboard</a>
         <a href="/workspaces" class="hover:text-cyan-400 transition-colors">Workspaces</a>
         <a href="/documents" class="hover:text-cyan-400 transition-colors">Documents</a>
+        <a href="/rag" class="hover:text-cyan-400 transition-colors">RAG Assistant</a>
         <a href="/" class="text-slate-400 hover:text-slate-200 transition-colors">Diagnostics</a>
       </nav>
 

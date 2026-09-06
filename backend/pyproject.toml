@@ -17,6 +17,11 @@ dependencies = [
     "boto3>=1.35.0",
     "structlog>=24.4.0",
     "python-multipart>=0.0.12",
+    "pymupdf>=1.24.0",
+    "python-docx>=1.1.0",
+    "transformers>=4.40.0",
+    "sentence-transformers>=3.0.0",
+    "arq>=0.26.0",
 ]
 
 [project.optional-dependencies]
