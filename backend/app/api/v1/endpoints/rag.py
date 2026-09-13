@@ -253,7 +253,9 @@ async def get_document_chunks(
     if not doc:
         raise DocumentNotFoundException()
 
-    chunks = await rag_service.get_document_chunks(db=db, document_id=document_id)
+    chunks = await rag_service.get_document_chunks(
+        db=db, document_id=document_id, workspace_id=workspace_id
+    )
     chunks_out = [
         DocumentChunkOut(
             id=c.id,

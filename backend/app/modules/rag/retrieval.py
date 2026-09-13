@@ -102,6 +102,7 @@ class HybridRetrievalService:
                 )
                 .join(Document, DocumentChunk.document_id == Document.id)
                 .where(
+                    DocumentChunk.workspace_id == workspace_id,
                     Document.workspace_id == workspace_id,
                     Document.status == "ready",
                     Document.active_generation_id == DocumentChunk.generation_id,
@@ -125,6 +126,7 @@ class HybridRetrievalService:
                 )
                 .join(Document, DocumentChunk.document_id == Document.id)
                 .where(
+                    DocumentChunk.workspace_id == workspace_id,
                     Document.workspace_id == workspace_id,
                     Document.status == "ready",
                     Document.active_generation_id == DocumentChunk.generation_id,
@@ -134,6 +136,12 @@ class HybridRetrievalService:
             sparse_rows = (await db.execute(stmt_sparse)).mappings().all()
         else:
             # PostgreSQL + pgvector query
+            # Increase HNSW ef_search for transactional query to avoid recall exhaustion under filtered workspaces
+            try:
+                await db.execute(text("SET LOCAL hnsw.ef_search = 100;"))
+            except Exception:
+                pass
+
             dense_sql = text("""
                 SELECT 
                     c.id AS chunk_id,
@@ -148,7 +156,8 @@ class HybridRetrievalService:
                     (1 - (c.embedding <=> cast(:query_vector as vector))) AS dense_score
                 FROM document_chunks c
                 JOIN documents d ON c.document_id = d.id
-                WHERE d.workspace_id = :workspace_id
+                WHERE c.workspace_id = :workspace_id
+                  AND d.workspace_id = :workspace_id
                   AND d.status = 'ready'
                   AND d.active_generation_id = c.generation_id
                   AND c.embedding IS NOT NULL
@@ -178,7 +187,8 @@ class HybridRetrievalService:
                     ts_rank(c.tsv_content, plainto_tsquery('english', :query)) AS sparse_score
                 FROM document_chunks c
                 JOIN documents d ON c.document_id = d.id
-                WHERE d.workspace_id = :workspace_id
+                WHERE c.workspace_id = :workspace_id
+                  AND d.workspace_id = :workspace_id
                   AND d.status = 'ready'
                   AND d.active_generation_id = c.generation_id
                   AND c.tsv_content @@ plainto_tsquery('english', :query)

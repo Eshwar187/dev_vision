@@ -56,7 +56,10 @@ class IngestionWorker:
         self.settings = get_settings()
 
     async def acquire_lease(
-        self, db: AsyncSession, document_id: uuid.UUID
+        self,
+        db: AsyncSession,
+        document_id: uuid.UUID,
+        workspace_id: Optional[uuid.UUID] = None,
     ) -> Optional[int]:
         """
         Acquire or reclaim an expired lease on the document.
@@ -80,6 +83,7 @@ class IngestionWorker:
             token = 1
             new_lease = DocumentProcessingLease(
                 document_id=document_id,
+                workspace_id=workspace_id,
                 worker_id=self.worker_id,
                 fencing_token=token,
                 lease_acquired_at=now,
@@ -102,6 +106,8 @@ class IngestionWorker:
         # Reclaim or renew: increment fencing token monotonically
         token = lease.fencing_token + 1
         lease.worker_id = self.worker_id
+        if workspace_id:
+            lease.workspace_id = workspace_id
         lease.fencing_token = token
         lease.lease_acquired_at = now
         lease.lease_expires_at = lease_expires_at
@@ -132,7 +138,11 @@ class IngestionWorker:
         return result.rowcount > 0
 
     async def verify_fencing_ownership_barrier(
-        self, db: AsyncSession, document_id: uuid.UUID, fencing_token: int
+        self,
+        db: AsyncSession,
+        document_id: uuid.UUID,
+        fencing_token: int,
+        generation_id: Optional[uuid.UUID] = None,
     ) -> None:
         """
         Transactional ownership barrier.
@@ -155,6 +165,11 @@ class IngestionWorker:
                 f"Fencing ownership barrier violation: worker {self.worker_id} with token {fencing_token} "
                 f"no longer owns document {document_id}."
             )
+        if generation_id is not None and lease.generation_id is not None and lease.generation_id != generation_id:
+            raise RuntimeError(
+                f"Fencing ownership barrier violation: lease generation mismatch for document {document_id}. "
+                f"Expected generation {generation_id}, found {lease.generation_id}."
+            )
 
     async def release_lease(
         self, db: AsyncSession, document_id: uuid.UUID, fencing_token: int
@@ -176,8 +191,15 @@ class IngestionWorker:
         """
         Execute full indexing lifecycle for a document in a background worker session.
         """
+        gen_id: Optional[uuid.UUID] = None
+        # Fetch document to obtain workspace_id before acquiring lease
         async with AsyncSessionLocal() as db:
-            fencing_token = await self.acquire_lease(db, document_id)
+            doc = await db.get(Document, document_id)
+            if not doc:
+                raise ValueError(f"Document {document_id} not found")
+            workspace_id = doc.workspace_id
+
+            fencing_token = await self.acquire_lease(db, document_id, workspace_id=workspace_id)
             if fencing_token is None:
                 raise RuntimeError(f"Document {document_id} is currently leased by another active worker.")
 
@@ -223,25 +245,33 @@ class IngestionWorker:
                 gen_version = len(existing_gens) + 1
 
                 generation = DocumentIndexGeneration(
+                    workspace_id=doc.workspace_id,
                     document_id=document_id,
-                    version=gen_version,
+                    generation_number=gen_version,
                     stage="extracting",
                     status="building",
-                    trigger_reason=trigger_reason,
-                    embedding_model=self.embedding_model.model_name,
-                    embedding_version=self.embedding_model.model_version,
-                    embedding_dimension=self.embedding_model.dimension,
                 )
                 db.add(generation)
 
                 # Set macro status to processing
                 doc.status = "processing"
-                doc.status_message = f"Building index generation v{gen_version} (extracting)..."
-                await db.commit()
-                await db.refresh(generation)
+                await db.flush()
                 gen_id = generation.id
-                storage_path = doc.storage_path
-                doc_name = doc.name
+                storage_path = getattr(doc, "object_key", None) or getattr(doc, "storage_path", None)
+                doc_name = getattr(doc, "original_filename", None) or getattr(doc, "name", "document")
+
+                # Associate generation_id on active lease row
+                lease_stmt = (
+                    update(DocumentProcessingLease)
+                    .where(
+                        DocumentProcessingLease.document_id == document_id,
+                        DocumentProcessingLease.worker_id == self.worker_id,
+                        DocumentProcessingLease.fencing_token == fencing_token,
+                    )
+                    .values(generation_id=gen_id)
+                )
+                await db.execute(lease_stmt)
+                await db.commit()
 
             # 2. Download file content from object storage
             storage = get_storage()
@@ -251,14 +281,11 @@ class IngestionWorker:
             extraction_result = extract_document(file_bytes, doc_name)
 
             async with AsyncSessionLocal() as db:
-                await self.verify_fencing_ownership_barrier(db, document_id, fencing_token)
+                await self.verify_fencing_ownership_barrier(db, document_id, fencing_token, generation_id=gen_id)
                 gen = await db.get(DocumentIndexGeneration, gen_id)
                 if gen:
                     gen.stage = "chunking"
                     gen.unextractable_pages = extraction_result.unextractable_pages
-                doc = await db.get(Document, document_id)
-                if doc:
-                    doc.status_message = f"Building index generation v{gen_version} (chunking)..."
                 await db.commit()
 
             # 4. Chunk sections into deterministic passages
@@ -269,14 +296,11 @@ class IngestionWorker:
             )
 
             async with AsyncSessionLocal() as db:
-                await self.verify_fencing_ownership_barrier(db, document_id, fencing_token)
+                await self.verify_fencing_ownership_barrier(db, document_id, fencing_token, generation_id=gen_id)
                 gen = await db.get(DocumentIndexGeneration, gen_id)
                 if gen:
                     gen.stage = "embedding"
                     gen.total_chunks = len(tokenized_chunks)
-                doc = await db.get(Document, document_id)
-                if doc:
-                    doc.status_message = f"Building index generation v{gen_version} (embedding {len(tokenized_chunks)} chunks)..."
                 await db.commit()
 
             # 5. Embed in batches of 50 and persist to document_chunks
@@ -288,43 +312,63 @@ class IngestionWorker:
 
                 async with AsyncSessionLocal() as db:
                     # Transactional ownership barrier before mutating database
-                    await self.verify_fencing_ownership_barrier(db, document_id, fencing_token)
+                    await self.verify_fencing_ownership_barrier(db, document_id, fencing_token, generation_id=gen_id)
 
-                    for chunk_idx, (chunk_data, emb) in enumerate(
-                        zip(batch, batch_embeddings), start=i
-                    ):
-                        vector_str = f"[{','.join(str(round(v, 6)) for v in emb)}]"
-                        # Insert chunk with raw vector literal and tsvector search_vector
+                    dialect_name = db.bind.dialect.name if db.bind else "postgresql"
+                    if dialect_name == "sqlite":
+                        for chunk_idx, (chunk_data, emb) in enumerate(
+                            zip(batch, batch_embeddings), start=i
+                        ):
+                            db.add(DocumentChunk(
+                                id=uuid.uuid4(),
+                                workspace_id=workspace_id,
+                                document_id=document_id,
+                                generation_id=gen_id,
+                                chunk_index=chunk_idx,
+                                page_number=chunk_data.page_number,
+                                section_heading=chunk_data.section_heading,
+                                token_count=chunk_data.token_count,
+                                text_content=chunk_data.content,
+                                tsv_content=chunk_data.content,
+                                embedding=emb,
+                                model_name=self.embedding_model.model_name,
+                                model_version=self.embedding_model.model_version,
+                            ))
+                    else:
                         insert_chunk_sql = text("""
                             INSERT INTO document_chunks (
-                                id, document_id, generation_id, chunk_index,
-                                content, page_number, section_heading,
-                                token_count, embedding, search_vector, created_at
+                                id, workspace_id, document_id, generation_id, chunk_index,
+                                page_number, section_heading, token_count, text_content,
+                                tsv_content, embedding, model_name, model_version, created_at
                             ) VALUES (
-                                :id, :document_id, :generation_id, :chunk_index,
-                                :content, :page_number, :section_heading,
-                                :token_count, cast(:embedding as vector),
-                                to_tsvector('english', :content), NOW()
+                                :id, :workspace_id, :document_id, :generation_id, :chunk_index,
+                                :page_number, :section_heading, :token_count, :text_content,
+                                to_tsvector('english', :text_content), cast(:embedding as vector),
+                                :model_name, :model_version, NOW()
                             )
                         """)
-                        await db.execute(
-                            insert_chunk_sql,
-                            {
-                                "id": uuid.uuid4(),
-                                "document_id": document_id,
-                                "generation_id": gen_id,
-                                "chunk_index": chunk_idx,
-                                "content": chunk_data.content,
-                                "page_number": chunk_data.page_number,
-                                "section_heading": chunk_data.section_heading,
-                                "token_count": chunk_data.token_count,
-                                "embedding": vector_str,
-                            },
-                        )
+                        for chunk_idx, (chunk_data, emb) in enumerate(
+                            zip(batch, batch_embeddings), start=i
+                        ):
+                            vector_str = f"[{','.join(str(round(v, 6)) for v in emb)}]"
+                            await db.execute(
+                                insert_chunk_sql,
+                                {
+                                    "id": uuid.uuid4(),
+                                    "workspace_id": workspace_id,
+                                    "document_id": document_id,
+                                    "generation_id": gen_id,
+                                    "chunk_index": chunk_idx,
+                                    "page_number": chunk_data.page_number,
+                                    "section_heading": chunk_data.section_heading,
+                                    "token_count": chunk_data.token_count,
+                                    "text_content": chunk_data.content,
+                                    "embedding": vector_str,
+                                    "model_name": self.embedding_model.model_name,
+                                    "model_version": self.embedding_model.model_version,
+                                },
+                            )
 
-                    gen = await db.get(DocumentIndexGeneration, gen_id)
-                    if gen:
-                        gen.embedded_chunks = min(i + len(batch), len(tokenized_chunks))
                     await db.commit()
 
             # 6. Zero-Downtime Activation & Retired-Generation Retirement
@@ -339,7 +383,7 @@ class IngestionWorker:
                 doc = doc_res.scalar_one()
 
                 # Verify ownership barrier
-                await self.verify_fencing_ownership_barrier(db, document_id, fencing_token)
+                await self.verify_fencing_ownership_barrier(db, document_id, fencing_token, generation_id=gen_id)
 
                 now = datetime.now(timezone.utc)
                 prev_active_id = doc.active_generation_id
@@ -361,7 +405,7 @@ class IngestionWorker:
                         status="active",
                         stage="ready",
                         activated_at=now,
-                        embedded_chunks=len(tokenized_chunks),
+                        total_chunks=len(tokenized_chunks),
                     )
                 )
                 await db.execute(gen_stmt)
@@ -369,7 +413,6 @@ class IngestionWorker:
                 # Set document active generation and ready status
                 doc.active_generation_id = gen_id
                 doc.status = "ready"
-                doc.status_message = "Document indexed and ready for retrieval."
                 await db.commit()
 
             logger.info(
@@ -382,17 +425,22 @@ class IngestionWorker:
 
         except Exception as exc:
             logger.error("document_indexing_failed", document_id=str(document_id), error=str(exc))
-            # Mark generation and document as failed
+            # Mark generation and document as failed safely
             try:
                 async with AsyncSessionLocal() as db:
-                    gen = await db.get(DocumentIndexGeneration, gen_id)
-                    if gen:
-                        gen.status = "failed"
-                        gen.error_message = str(exc)
+                    if gen_id:
+                        gen = await db.get(DocumentIndexGeneration, gen_id)
+                        if gen:
+                            gen.status = "failed"
+                            gen.stage = "failed"
+                            gen.error_message = str(exc)
                     doc = await db.get(Document, document_id)
                     if doc:
-                        doc.status = "failed"
-                        doc.status_message = f"Indexing failed: {str(exc)}"
+                        if doc.active_generation_id:
+                            # Reindexing failed, but prior active index is intact: maintain ready status
+                            doc.status = "ready"
+                        else:
+                            doc.status = "failed"
                     await db.commit()
             except Exception:
                 pass
