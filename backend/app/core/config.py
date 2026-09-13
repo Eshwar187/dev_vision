@@ -1,5 +1,5 @@
 from functools import lru_cache
-from typing import List, Union
+from typing import List, Optional, Union
 from pydantic import AnyHttpUrl, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -36,7 +36,7 @@ class Settings(BaseSettings):
             return [i.strip() for i in v.split(",") if i.strip()]
         return v
 
-    # PostgreSQL + pgvector
+    # PostgreSQL + pgvector (Supabase Managed Cloud Architecture)
     POSTGRES_USER: str = "devvision"
     POSTGRES_PASSWORD: str = "devvision_password"
     POSTGRES_DB: str = "devvision"
@@ -44,12 +44,22 @@ class Settings(BaseSettings):
     POSTGRES_PORT: int = 5432
     DATABASE_URL: str = "postgresql+asyncpg://devvision:devvision_password@localhost:5432/devvision"
     DATABASE_SYNC_URL: str = "postgresql+psycopg2://devvision:devvision_password@localhost:5432/devvision"
+    # Worker-specific database URL (Mandatory for Supabase Direct Port 5432 with session semantics)
+    WORKER_DATABASE_URL: Optional[str] = None
 
-    # Database Pool Settings
+    @property
+    def worker_database_url_effective(self) -> str:
+        return self.WORKER_DATABASE_URL or self.DATABASE_URL
+
+    # Database Pool Settings (API / Stateless Traffic)
     DB_POOL_SIZE: int = 10
     DB_MAX_OVERFLOW: int = 20
     DB_POOL_TIMEOUT: int = 30
     DB_POOL_RECYCLE: int = 1800
+
+    # Worker Database Pool Settings (Dedicated Direct Connection)
+    WORKER_DB_POOL_SIZE: int = 5
+    WORKER_DB_MAX_OVERFLOW: int = 10
 
     # Redis
     REDIS_HOST: str = "localhost"

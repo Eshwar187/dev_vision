@@ -108,7 +108,11 @@ class HybridRetrievalService:
         vector_str = f"[{','.join(str(round(v, 6)) for v in query_vector)}]"
 
         # 3. Dense & Sparse candidate search pinned strictly to active_gen_ids snapshot
-        dialect_name = db.bind.dialect.name if db.bind else "postgresql"
+        try:
+            bind = db.get_bind()
+            dialect_name = bind.dialect.name if bind else "postgresql"
+        except Exception:
+            dialect_name = "postgresql"
 
         t_dense = time.perf_counter()
         if dialect_name == "sqlite":

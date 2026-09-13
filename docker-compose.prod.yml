@@ -1,47 +1,19 @@
-﻿# ==============================================================================
-# DevVision AI — Production Compose Architecture (100% Self-Hosted RAG)
+# ==============================================================================
+# DevVision AI — Production Compose Architecture
+# 100% Self-Hosted AI Inference + Supabase-Managed PostgreSQL (pgvector)
 # ==============================================================================
 version: "3.8"
 
 services:
-  postgres:
-    image: pgvector/pgvector:pg16
-    container_name: devvision_postgres_prod
-    restart: always
-    environment:
-      POSTGRES_USER: ${POSTGRES_USER:-devvision}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
-      POSTGRES_DB: ${POSTGRES_DB:-devvision}
-      PGDATA: /var/lib/postgresql/data/pgdata
-    volumes:
-      - postgres_prod_data:/var/lib/postgresql/data
-      - ./docker/init-db.sql:/docker-entrypoint-initdb.d/01-init-db.sql:ro
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-devvision} -d ${POSTGRES_DB:-devvision}"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 15s
-    deploy:
-      resources:
-        limits:
-          cpus: "4.0"
-          memory: 8G
-        reservations:
-          cpus: "1.0"
-          memory: 2G
-    networks:
-      - devvision_internal
-
   redis:
     image: redis:7-alpine
     container_name: devvision_redis_prod
     restart: always
-    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD:-}"]
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD:?REDIS_PASSWORD is required}"]
     volumes:
       - redis_prod_data:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -50,6 +22,11 @@ services:
         limits:
           cpus: "1.0"
           memory: 1G
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     networks:
       - devvision_internal
 
@@ -74,6 +51,11 @@ services:
         limits:
           cpus: "2.0"
           memory: 4G
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     networks:
       - devvision_internal
 
@@ -84,8 +66,6 @@ services:
     container_name: devvision_backend_prod
     restart: always
     depends_on:
-      postgres:
-        condition: service_healthy
       redis:
         condition: service_healthy
       minio:
@@ -94,7 +74,9 @@ services:
       - ENVIRONMENT=production
       - DEBUG=false
       - SECRET_KEY=${SECRET_KEY:?SECRET_KEY is required}
-      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-devvision}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-devvision}
+      # Supabase Connection Modes:
+      # DATABASE_URL can use Supabase Transaction Pooler (port 6543) or Session mode (port 5432)
+      - DATABASE_URL=${DATABASE_URL:?DATABASE_URL pointing to Supabase PostgreSQL is required}
       - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
       - S3_ENDPOINT_URL=http://minio:9000
       - S3_ACCESS_KEY=${S3_ACCESS_KEY}
@@ -102,6 +84,7 @@ services:
       - S3_BUCKET_NAME=${S3_BUCKET_NAME:-devvision-documents}
       - S3_REGION=${S3_REGION:-us-east-1}
       - S3_SECURE=false
+      # 100% Self-Hosted Local AI Inference Stack
       - LLM_BACKEND=${LLM_BACKEND:-ollama}
       - LLM_BASE_URL=${LLM_BASE_URL:-http://host.docker.internal:11434}
       - LLM_MODEL=${LLM_MODEL:-qwen2.5-coder:7b-instruct-q4_K_M}
@@ -120,6 +103,11 @@ services:
         reservations:
           cpus: "1.0"
           memory: 2G
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     networks:
       - devvision_internal
 
@@ -130,8 +118,6 @@ services:
     container_name: devvision_worker_prod
     restart: always
     depends_on:
-      postgres:
-        condition: service_healthy
       redis:
         condition: service_healthy
       minio:
@@ -139,7 +125,9 @@ services:
     environment:
       - ENVIRONMENT=production
       - DEBUG=false
-      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-devvision}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-devvision}
+      # Dedicated Direct Connection (Port 5432) for monotonic fencing and SELECT ... FOR UPDATE leases
+      - DATABASE_URL=${DATABASE_URL:?DATABASE_URL pointing to Supabase PostgreSQL is required}
+      - WORKER_DATABASE_URL=${WORKER_DATABASE_URL:-${DATABASE_URL}}
       - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
       - S3_ENDPOINT_URL=http://minio:9000
       - S3_ACCESS_KEY=${S3_ACCESS_KEY}
@@ -147,6 +135,7 @@ services:
       - S3_BUCKET_NAME=${S3_BUCKET_NAME:-devvision-documents}
       - S3_REGION=${S3_REGION:-us-east-1}
       - S3_SECURE=false
+      # Self-Hosted BGE Embeddings & Reranker
       - EMBEDDING_MODEL_NAME=BAAI/bge-small-en-v1.5
       - RERANKER_MODEL_NAME=BAAI/bge-reranker-base
       - RERANKER_ENABLED=true
@@ -161,6 +150,11 @@ services:
         reservations:
           cpus: "1.0"
           memory: 2G
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     networks:
       - devvision_internal
 
@@ -179,11 +173,21 @@ services:
       - PORT=3000
       - HOST=0.0.0.0
       - ORIGIN=http://localhost:3000
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
     deploy:
       resources:
         limits:
           cpus: "2.0"
           memory: 2G
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     networks:
       - devvision_internal
 
@@ -192,6 +196,5 @@ networks:
     driver: bridge
 
 volumes:
-  postgres_prod_data:
   redis_prod_data:
   minio_prod_data:

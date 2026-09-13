@@ -1,15 +1,18 @@
-﻿# DevVision AI — Production Deployment & Operations Guide
+# DevVision AI — Production Deployment & Operations Guide
 
 ## Overview
 
-DevVision AI is a production-grade, 100% self-hosted AI architecture featuring:
-- Multi-tenant workspace isolation with role-based access control (RBAC).
-- Local Hugging Face embedding models (`BAAI/bge-small-en-v1.5`, 384 dimensions).
-- Local BGE cross-encoder reranker (`BAAI/bge-reranker-base`).
-- Local Ollama or `llama.cpp` inference daemon (`qwen2.5-coder:7b-instruct-q4_K_M`).
-- PostgreSQL with `pgvector` hybrid search (exact RRF fusion of dense vectors + sparse English `tsvector`).
-- Distributed worker daemon with atomic row leasing and fencing tokens.
-- Zero external AI APIs (no OpenAI, no Anthropic, no Cohere, no hosted vector DBs).
+DevVision AI operates under a strict architectural contract:
+
+> **"Zero external cloud AI APIs and fully self-hosted AI inference, with Supabase-managed PostgreSQL + pgvector."**
+
+Key architectural guarantees:
+- **100% Self-Hosted AI Inference**: Local BGE embedding models (`BAAI/bge-small-en-v1.5`), local BGE cross-encoder reranker (`BAAI/bge-reranker-base`), and local Ollama or `llama.cpp` inference (`qwen2.5-coder:7b-instruct-q4_K_M`). Zero OpenAI, zero Anthropic, zero Gemini, zero Cohere.
+- **Supabase-Managed PostgreSQL + pgvector**: Managed high-availability database with native pgvector extension for dense vector storage and HNSW indexing, paired with PostgreSQL `tsvector` for sparse full-text search and exact Reciprocal Rank Fusion (RRF).
+- **Connection Mode Separation**:
+  - `DATABASE_URL`: Transaction Pooler (Port 6543) or Session Connection for high-throughput API traffic. Configured with `prepared_statement_cache_size: 0` for pooler compatibility.
+  - `WORKER_DATABASE_URL`: Direct Connection (Port 5432) for background ingestion workers and Alembic migrations. Guarantees transactional row locks (`SELECT ... FOR UPDATE`), heartbeat lease renewal, monotonic fencing barriers, and atomic zero-downtime generation activation.
+- **Multi-Tenant Isolation**: Tenant boundaries enforced via workspace-scoped schemas, row ownership predicates, and anti-enumeration defenses.
 
 ---
 
@@ -32,12 +35,15 @@ DevVision AI is a production-grade, 100% self-hosted AI architecture featuring:
           ┌──────────────────────────────────────┼────────────────────────┐
           │                                      │                        │
           ▼                                      ▼                        ▼
-┌───────────────────┐                  ┌───────────────────┐    ┌───────────────────┐
-│ PostgreSQL 16     │                  │ Redis 7           │    │ MinIO (S3)        │
-│ + pgvector (5432) │                  │ (6379)            │    │ (9000 / 9001)     │
-└─────────┬─────────┘                  └─────────┬─────────┘    └─────────┬─────────┘
-          │                                      │                        │
-          └───────────────────┬──────────────────┴────────────────────────┘
+┌───────────────────────────┐       ┌───────────────────┐    ┌───────────────────┐
+│ Supabase PostgreSQL 16    │       │ Redis 7           │    │ MinIO (S3)        │
+│ + pgvector                │       │ (6379)            │    │ (9000 / 9001)     │
+│ Port 6543 (Tx Pooler)     │       └─────────┬─────────┘    └─────────┬─────────┘
+│ Port 5432 (Direct Conn)   │                 │                        │
+└─────────┬─────────────────┘                 │                        │
+          │                                   │                        │
+          │ (Direct 5432)                     │                        │
+          └───────────────────┬───────────────┴────────────────────────┘
                               │
                               ▼
                  ┌──────────────────────────┐
@@ -47,7 +53,7 @@ DevVision AI is a production-grade, 100% self-hosted AI architecture featuring:
                               │
                               ▼
                  ┌──────────────────────────┐
-                 │ Local LLM Daemon         │
+                 │ Local AI Inference Host  │
                  │ Ollama / llama.cpp       │
                  │ Port 11434               │
                  └──────────────────────────┘
@@ -55,44 +61,74 @@ DevVision AI is a production-grade, 100% self-hosted AI architecture featuring:
 
 ---
 
-## 2. Production Deployment via Docker Compose
+## 2. Supabase PostgreSQL Configuration
+
+### Step 1: Enable pgvector Extension in Supabase
+In your Supabase project dashboard, navigate to **Database -> Extensions** or open the **SQL Editor** and execute:
+```sql
+CREATE EXTENSION IF NOT EXISTS vector;
+```
+
+### Step 2: Obtain Supabase Connection Strings
+In the Supabase dashboard (**Project Settings -> Database**):
+1. **Transaction Pooler Connection** (Port `6543`, Mode: `Transaction`):
+   ```
+   postgresql+asyncpg://postgres.[PROJECT_REF]:[PASSWORD]@aws-0-[REGION].pooler.supabase.com:6543/postgres
+   ```
+   Use this for `DATABASE_URL` (API traffic).
+2. **Direct Connection** (Port `5432`, Mode: `Session` / Direct):
+   ```
+   postgresql+asyncpg://postgres.[PROJECT_REF]:[PASSWORD]@db.[PROJECT_REF].supabase.co:5432/postgres
+   ```
+   Use this for `WORKER_DATABASE_URL` (Worker leases, fencing tokens, and Alembic migrations).
+
+---
+
+## 3. Production Deployment via Docker Compose
 
 ### Prerequisites
 - Docker Engine 24.0+ and Docker Compose v2.20+
-- Host with at least 16GB RAM and 4+ CPU cores (8+ CPU cores recommended for local LLM inference)
+- Host with at least 16GB RAM and 4+ CPU cores (NVIDIA GPU recommended for local inference)
 - Local Ollama daemon running on host (e.g. `ollama serve` with `ollama pull qwen2.5-coder:7b-instruct-q4_K_M`)
+- Active Supabase project with pgvector enabled
 
-### Step 1: Prepare Environment Variables
-Copy `.env.example` to `.env` and configure strong secrets:
+### Step 1: Configure Environment Variables
+Create `.env` based on `.env.example`:
 ```bash
 # Security Keys
 SECRET_KEY=your_64_character_cryptographically_secure_random_key_here
-POSTGRES_PASSWORD=your_production_postgres_password_here
 REDIS_PASSWORD=your_production_redis_password_here
 S3_ACCESS_KEY=your_minio_access_key
 S3_SECRET_KEY=your_minio_secret_key
 
-# Infrastructure URLs
-DATABASE_URL=postgresql+asyncpg://devvision:${POSTGRES_PASSWORD}@postgres:5432/devvision
+# Supabase Managed Database URLs
+DATABASE_URL=postgresql+asyncpg://postgres.yourproject:yourpassword@aws-0-us-east-1.pooler.supabase.com:6543/postgres
+WORKER_DATABASE_URL=postgresql+asyncpg://postgres.yourproject:yourpassword@db.yourproject.supabase.co:5432/postgres
+
+# Storage & Cache
 REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
 S3_ENDPOINT_URL=http://minio:9000
 S3_BUCKET_NAME=devvision-documents
 
-# Local AI Engine
+# 100% Self-Hosted Local AI Engine
 LLM_BACKEND=ollama
 LLM_BASE_URL=http://host.docker.internal:11434
 LLM_MODEL=qwen2.5-coder:7b-instruct-q4_K_M
 RAG_QUERY_TIMEOUT_SECONDS=60
+EMBEDDING_MODEL_NAME=BAAI/bge-small-en-v1.5
+RERANKER_MODEL_NAME=BAAI/bge-reranker-base
+RERANKER_ENABLED=true
 ```
 
-### Step 2: Launch Production Services
+### Step 2: Apply Database Migrations
+Run Alembic migrations using direct connection mode to ensure DDL execution and pgvector index creation:
+```bash
+docker compose -f docker-compose.prod.yml run --rm backend alembic upgrade head
+```
+
+### Step 3: Launch Production Containers
 ```bash
 docker compose -f docker-compose.prod.yml up -d --build
-```
-
-### Step 3: Run Database Migrations
-```bash
-docker compose -f docker-compose.prod.yml exec backend alembic upgrade head
 ```
 
 ### Step 4: Verify Deployment Health
@@ -100,73 +136,80 @@ docker compose -f docker-compose.prod.yml exec backend alembic upgrade head
 # Check shallow liveness probe
 curl -f http://localhost:8000/health/live
 
-# Check deep readiness probe
-curl -f http://localhost:8000/ready
+# Check deep readiness probe (verifies Supabase DB, Redis, MinIO, and Ollama)
+curl -f http://localhost:8000/health/ready
 
 # Check Prometheus metrics
-curl -s http://localhost:8000/metrics
+curl -s http://localhost:8000/metrics | grep rag_
 ```
 
 ---
 
-## 3. Observability & Metrics Specification
+## 4. Disaster Recovery & Backup Procedures
 
-DevVision AI exposes standard Prometheus text format metrics at `/metrics`:
+Logical backup and restore utilities are provided in `scripts/`:
 
-| Metric Name | Type | Description |
-| :--- | :--- | :--- |
-| `devvision_rag_queries_total` | Counter | Total RAG queries labeled by `status` (`success`, `timeout`, `error`, `safe_refusal`) |
-| `devvision_rag_query_duration_seconds` | Histogram | End-to-end query latency with cumulative buckets up to 60s |
-| `devvision_rag_dense_retrieval_duration_seconds` | Histogram | Dense vector retrieval duration |
-| `devvision_rag_sparse_retrieval_duration_seconds` | Histogram | Full-text tsvector retrieval duration |
-| `devvision_rag_rerank_duration_seconds` | Histogram | Cross-encoder reranker inference duration |
-| `devvision_rag_llm_duration_seconds` | Histogram | Local LLM inference duration |
-| `devvision_rag_documents_ingested_total` | Counter | Total documents indexed by status (`completed`, `failed`) |
-| `devvision_rag_generation_activations_total` | Counter | Total successful zero-downtime generation activations |
-| `devvision_rag_worker_lease_failures_total` | Counter | Fencing token mismatches and lease expiration collisions |
-| `devvision_rag_generation_gc_total` | Counter | Total retired/failed index generations cleaned up |
+### Creating a Logical Backup
+To export a compressed, self-contained pgvector-preserving archive from Supabase:
+```powershell
+# PowerShell (Windows)
+.\scripts\backup.ps1 -DatabaseUrl $env:WORKER_DATABASE_URL -OutputDir backups
 
----
+# Bash (Linux/macOS)
+./scripts/backup.sh backups
+```
+The script uses `pg_dump` with `--format=custom --compress=9 --clean --if-exists --no-owner --no-privileges` to preserve table schemas, HNSW vector indices, and relational integrity.
 
-## 4. Rate Limiting & Operational Ceilings
+### Restoring from Backup
+To restore a snapshot into a target database and verify pgvector integrity:
+```powershell
+# PowerShell (Windows)
+.\scripts\restore.ps1 -BackupFile backups\devvision_backup_20260913_120000.dump -DatabaseUrl $env:WORKER_DATABASE_URL
 
-### Sliding-Window Ceilings
-- **RAG Queries**: 30 queries/minute per workspace.
-- **Document Uploads**: 10 uploads/minute per workspace.
-- **Document Reindexing**: 5 reindexes/minute per workspace.
-- Exceeding limits returns `HTTP 429 Too Many Requests` with `Retry-After: <seconds>`.
-
-### Request & Resource Ceilings
-- **Max Document Size**: 20 MB payload limit enforced before parsing.
-- **Max Extracted Text**: 10 MB text limit per document.
-- **Max Query Length**: 2000 characters limit.
-- **Max Retrieval Candidates**: `top_k <= 10` (query schema constraint).
-- **RAG Execution Timeout**: 60 seconds hard ceiling via `asyncio.wait_for`.
+# Bash (Linux/macOS)
+./scripts/restore.sh backups/devvision_backup_20260913_120000.dump
+```
+Post-restore verification automatically checks:
+1. `vector` extension status.
+2. Total tables restored.
+3. HNSW index validity.
 
 ---
 
-## 5. Standalone Worker Daemon & Scaling
+## 5. Performance Benchmarking & Load Testing
 
-The worker daemon runs as an isolated process:
+A parameterized load testing tool is included at `backend/benchmarks/load_test.py`.
+
+### Running Standalone Benchmark
 ```bash
-python -m app.modules.rag.worker_loop
+python -m benchmarks.load_test --concurrency 5 --total-queries 50 --distribution zipfian
 ```
-- **Concurrency**: Scale horizontally by increasing replicas in `docker-compose.prod.yml` (`worker.deploy.replicas: N`).
-- **Distributed Fencing**: Each document indexing generation holds a monotonic `fencing_token`. Stale writes from expired workers are rejected with zero chance of split-brain corruption.
-- **Graceful Termination**: Handles `SIGTERM` and `SIGINT` by finishing the in-flight chunk batch and cleanly relinquishing leases.
-- **Automated GC**: Runs every 10 minutes to prune generations older than 90 days or failed indexing attempts.
+Measures:
+- End-to-end RAG latency (P50, P95, P99).
+- Hybrid retrieval latency (Dense, Sparse, RRF, Reranker).
+- Local LLM generation duration.
+- Error, timeout, and 429 rates.
+- Ingestion throughput (chunks/sec, docs/min).
+- Database connection pool utilization.
+
+Results are printed in an ASCII table and saved as structured JSON reports in `backend/benchmarks/results/`.
+
+### Running CI Performance Smoke Test
+```bash
+pytest benchmarks/test_benchmark_smoke.py -v
+```
 
 ---
 
-## 6. Disaster Recovery & Backup
+## 6. Production Readiness Checklist
 
-### PostgreSQL + pgvector Backup
-```bash
-docker compose -f docker-compose.prod.yml exec -T postgres pg_dump -U devvision -d devvision --format=custom -f /var/lib/postgresql/data/backup_$(date +%Y%m%d).dump
-```
-
-### MinIO Object Storage Backup
-```bash
-docker run --rm -v $(pwd)/backup:/backup --network devvision_internal minio/mc:latest \
-    mirror devvision_minio/devvision-documents /backup/devvision-documents
-```
+Before going live:
+- [ ] **Supabase pgvector**: Verified `CREATE EXTENSION IF NOT EXISTS vector;` executed in Supabase SQL Editor.
+- [ ] **Dual Connection Strings**: Verified `DATABASE_URL` uses pooler (Port 6543) and `WORKER_DATABASE_URL` uses direct connection (Port 5432).
+- [ ] **Migrations**: Executed `alembic upgrade head` to configure tables, HNSW indices, and constraints.
+- [ ] **Local AI Models**: Downloaded `BAAI/bge-small-en-v1.5`, `BAAI/bge-reranker-base`, and `qwen2.5-coder:7b-instruct-q4_K_M`.
+- [ ] **Readiness Check**: Confirmed `/health/ready` returns `200 OK` with `status: "healthy"`.
+- [ ] **Rate Limiting**: Verified Redis sliding window with in-memory fallback enabled.
+- [ ] **Log Sanitization**: Verified no raw prompts, tokens, or query texts are logged.
+- [ ] **Metrics**: Verified Prometheus metrics available at `/metrics` with bounded cardinality.
+- [ ] **Disaster Recovery**: Verified backup and restore scripts with test snapshot.

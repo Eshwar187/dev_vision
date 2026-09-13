@@ -19,7 +19,7 @@ from sqlalchemy import and_, or_, select
 import structlog
 
 from app.core.config import get_settings
-from app.core.database import AsyncSessionLocal
+from app.core.database import WorkerAsyncSessionLocal
 from app.core.logging import setup_logging
 from app.core.metrics import (
     rag_documents_ingested_total,
@@ -90,7 +90,7 @@ class WorkerDaemon:
         """Finds documents that need indexing and processes them with fencing protection."""
         now = datetime.now(timezone.utc)
 
-        async with AsyncSessionLocal() as db:
+        async with WorkerAsyncSessionLocal() as db:
             # Documents needing indexing:
             # 1. status == 'pending'
             # 2. status == 'processing' but lease expired (worker crash recovery)
@@ -137,7 +137,7 @@ class WorkerDaemon:
     async def _run_garbage_collection(self):
         """Safely purges retired generations older than 1 hour."""
         try:
-            async with AsyncSessionLocal() as db:
+            async with WorkerAsyncSessionLocal() as db:
                 deleted = await self.worker.cleanup_retired_generations(db, grace_period_hours=1)
                 if deleted > 0:
                     rag_generation_gc_total.inc(deleted)

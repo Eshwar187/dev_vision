@@ -25,7 +25,7 @@ from sqlalchemy import select, update, delete, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
-from app.core.database import AsyncSessionLocal
+from app.core.database import AsyncSessionLocal, WorkerAsyncSessionLocal
 from app.core.metrics import (
     rag_chunks_created_total,
     rag_documents_ingested_total,
@@ -216,7 +216,7 @@ class IngestionWorker:
         t0 = time.perf_counter()
         gen_id: Optional[uuid.UUID] = None
         # Fetch document to obtain workspace_id before acquiring lease
-        async with AsyncSessionLocal() as db:
+        async with WorkerAsyncSessionLocal() as db:
             doc = await db.get(Document, document_id)
             if not doc:
                 raise ValueError(f"Document {document_id} not found")
@@ -234,7 +234,7 @@ class IngestionWorker:
             while not stop_heartbeat.is_set():
                 try:
                     await asyncio.sleep(interval)
-                    async with AsyncSessionLocal() as h_db:
+                    async with WorkerAsyncSessionLocal() as h_db:
                         ok = await self.heartbeat(h_db, document_id, fencing_token)
                         if not ok:
                             logger.error(
@@ -253,7 +253,7 @@ class IngestionWorker:
 
         try:
             # 1. Fetch document metadata and create new generation
-            async with AsyncSessionLocal() as db:
+            async with WorkerAsyncSessionLocal() as db:
                 await self.verify_fencing_ownership_barrier(db, document_id, fencing_token)
                 
                 doc = await db.get(Document, document_id)
@@ -335,7 +335,7 @@ class IngestionWorker:
                 batch_embeddings = await self.embedding_model.embed_texts(batch_texts)
                 rag_embeddings_created_total.inc(len(batch_texts))
 
-                async with AsyncSessionLocal() as db:
+                async with WorkerAsyncSessionLocal() as db:
                     # Transactional ownership barrier before mutating database
                     await self.verify_fencing_ownership_barrier(db, document_id, fencing_token, generation_id=gen_id)
 
@@ -397,7 +397,7 @@ class IngestionWorker:
                     await db.commit()
 
             # 6. Zero-Downtime Activation & Retired-Generation Retirement
-            async with AsyncSessionLocal() as db:
+            async with WorkerAsyncSessionLocal() as db:
                 # Row lock on document to serialize activation with retired generation GC
                 doc_stmt = (
                     select(Document)
@@ -459,7 +459,7 @@ class IngestionWorker:
             logger.error("document_indexing_failed", document_id=str(document_id), error=str(exc))
             # Mark generation and document as failed safely and purge partial chunks
             try:
-                async with AsyncSessionLocal() as db:
+                async with WorkerAsyncSessionLocal() as db:
                     if gen_id:
                         # Purge any partial chunks persisted for this failed generation to avoid storage leak
                         del_chunks_stmt = delete(DocumentChunk).where(DocumentChunk.generation_id == gen_id)
@@ -489,7 +489,7 @@ class IngestionWorker:
             if heartbeat_task:
                 heartbeat_task.cancel()
             try:
-                async with AsyncSessionLocal() as db:
+                async with WorkerAsyncSessionLocal() as db:
                     await self.release_lease(db, document_id, fencing_token)
             except Exception as exc:
                 logger.warning("lease_release_failed", error=str(exc))

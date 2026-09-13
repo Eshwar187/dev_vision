@@ -19,7 +19,8 @@ if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
 settings = get_settings()
-config.set_main_option("sqlalchemy.url", settings.DATABASE_URL)
+# Use worker_database_url_effective to ensure migrations always use direct Port 5432 on Supabase
+config.set_main_option("sqlalchemy.url", settings.worker_database_url_effective)
 
 target_metadata = Base.metadata
 

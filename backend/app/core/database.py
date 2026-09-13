@@ -15,7 +15,12 @@ from app.core.logging import get_logger
 logger = get_logger("database")
 settings = get_settings()
 
-# Async SQLAlchemy Engine
+# Supabase Transaction Pooler compatibility: Disable statement caching if connecting via Supavisor / Pgbouncer
+_api_connect_args = {}
+if ":6543" in settings.DATABASE_URL or "pooler" in settings.DATABASE_URL:
+    _api_connect_args["prepared_statement_cache_size"] = 0
+
+# Async SQLAlchemy Engine (API / Stateless queries)
 engine = create_async_engine(
     settings.DATABASE_URL,
     echo=False,
@@ -24,11 +29,31 @@ engine = create_async_engine(
     pool_timeout=settings.DB_POOL_TIMEOUT,
     pool_recycle=settings.DB_POOL_RECYCLE,
     pool_pre_ping=True,
+    connect_args=_api_connect_args,
 )
 
-# Async Session Factory
+# Async Session Factory for API traffic
 AsyncSessionLocal = async_sessionmaker(
     bind=engine,
+    class_=AsyncSession,
+    expire_on_commit=False,
+    autoflush=False,
+)
+
+# Dedicated Worker Engine (Direct Supabase Port 5432 with full session & FOR UPDATE semantics)
+worker_engine = create_async_engine(
+    settings.worker_database_url_effective,
+    echo=False,
+    pool_size=settings.WORKER_DB_POOL_SIZE,
+    max_overflow=settings.WORKER_DB_MAX_OVERFLOW,
+    pool_timeout=settings.DB_POOL_TIMEOUT,
+    pool_recycle=settings.DB_POOL_RECYCLE,
+    pool_pre_ping=True,
+)
+
+# Async Session Factory for Ingestion Worker Daemons
+WorkerAsyncSessionLocal = async_sessionmaker(
+    bind=worker_engine,
     class_=AsyncSession,
     expire_on_commit=False,
     autoflush=False,
