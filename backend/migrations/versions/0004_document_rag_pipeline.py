@@ -1,4 +1,4 @@
-﻿"""Document RAG pipeline schema
+"""Document RAG pipeline schema
 
 Revision ID: 0004_document_rag_pipeline
 Revises: 0003_document_management
@@ -82,7 +82,7 @@ def upgrade() -> None:
             "generation_id",
             postgresql.UUID(as_uuid=True),
             sa.ForeignKey("document_index_generations.id", ondelete="CASCADE"),
-            nullable=False,
+            nullable=True,
         ),
         sa.Column("worker_id", sa.String(length=128), nullable=False),
         sa.Column("fencing_token", sa.BigInteger(), server_default="1", nullable=False),

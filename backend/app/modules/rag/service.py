@@ -80,6 +80,7 @@ class RagService:
         self.citation_validator = CitationValidator()
 
     def _format_context(self, chunks: List[RetrievedChunk]) -> str:
+        import re
         formatted = []
         for c in chunks:
             marker = c.citation_marker or 1
@@ -88,8 +89,12 @@ class RagService:
                 meta += f" | Page: {c.page_number}"
             if c.section_heading:
                 meta += f" | Section: {c.section_heading}"
-            # Neutralize XML tag breakouts from malicious document content
-            safe_content = c.content.strip().replace("</context_passage>", "[tag_breakout_blocked]")
+            # Neutralize XML tag breakouts, comments, and CDATA from malicious document content
+            safe_content = c.content.strip()
+            safe_content = re.sub(r'</\s*context_passage[s]?\s*>', '[tag_breakout_blocked]', safe_content, flags=re.IGNORECASE)
+            safe_content = re.sub(r'<\s*context_passage[s]?(\s+[^>]*)?>', '[tag_blocked]', safe_content, flags=re.IGNORECASE)
+            safe_content = safe_content.replace("<!--", "[comment_blocked]").replace("-->", "[comment_blocked]")
+            safe_content = safe_content.replace("<![CDATA[", "[cdata_blocked]").replace("]]>", "[cdata_blocked]")
             formatted.append(f'[{marker}] ({meta})\n<context_passage index="{marker}">\n{safe_content}\n</context_passage>')
         return "\n\n".join(formatted)
 

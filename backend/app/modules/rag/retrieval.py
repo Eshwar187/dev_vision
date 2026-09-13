@@ -77,16 +77,34 @@ class HybridRetrievalService:
         Scoped exclusively to documents in the specified workspace whose status is 'ready'
         and chunks belong to the active_generation_id of the document.
         """
-        # 1. Compute query embedding for dense search
+        from app.modules.documents.models import Document
+        from app.modules.rag.models import DocumentChunk
+
+        # 1. Point-in-time active generation snapshot for ready documents in workspace
+        active_docs_stmt = (
+            select(Document.id, Document.active_generation_id)
+            .where(
+                Document.workspace_id == workspace_id,
+                Document.status == "ready",
+                Document.active_generation_id.isnot(None),
+            )
+        )
+        active_pairs = (await db.execute(active_docs_stmt)).all()
+        if not active_pairs:
+            return []
+
+        active_gen_ids = [gen_id for _, gen_id in active_pairs if gen_id is not None]
+        if not active_gen_ids:
+            return []
+
+        # 2. Compute query embedding for dense search
         query_vector = await self.embedding_model.embed_query(query)
         vector_str = f"[{','.join(str(round(v, 6)) for v in query_vector)}]"
 
-        # 2. Dense search query
+        # 3. Dense & Sparse candidate search pinned strictly to active_gen_ids snapshot
         dialect_name = db.bind.dialect.name if db.bind else "postgresql"
 
         if dialect_name == "sqlite":
-            from app.modules.documents.models import Document
-            from app.modules.rag.models import DocumentChunk
             stmt_dense = (
                 select(
                     DocumentChunk.id.label("chunk_id"),
@@ -105,6 +123,7 @@ class HybridRetrievalService:
                     DocumentChunk.workspace_id == workspace_id,
                     Document.workspace_id == workspace_id,
                     Document.status == "ready",
+                    DocumentChunk.generation_id.in_(active_gen_ids),
                     Document.active_generation_id == DocumentChunk.generation_id,
                 )
                 .limit(limit_dense)
@@ -129,6 +148,7 @@ class HybridRetrievalService:
                     DocumentChunk.workspace_id == workspace_id,
                     Document.workspace_id == workspace_id,
                     Document.status == "ready",
+                    DocumentChunk.generation_id.in_(active_gen_ids),
                     Document.active_generation_id == DocumentChunk.generation_id,
                 )
                 .limit(limit_sparse)
@@ -159,6 +179,7 @@ class HybridRetrievalService:
                 WHERE c.workspace_id = :workspace_id
                   AND d.workspace_id = :workspace_id
                   AND d.status = 'ready'
+                  AND c.generation_id = ANY(:active_gen_ids)
                   AND d.active_generation_id = c.generation_id
                   AND c.embedding IS NOT NULL
                 ORDER BY c.embedding <=> cast(:query_vector as vector) ASC
@@ -169,6 +190,7 @@ class HybridRetrievalService:
                 {
                     "query_vector": vector_str,
                     "workspace_id": workspace_id,
+                    "active_gen_ids": active_gen_ids,
                     "limit_dense": limit_dense,
                 },
             )).mappings().all()
@@ -190,6 +212,7 @@ class HybridRetrievalService:
                 WHERE c.workspace_id = :workspace_id
                   AND d.workspace_id = :workspace_id
                   AND d.status = 'ready'
+                  AND c.generation_id = ANY(:active_gen_ids)
                   AND d.active_generation_id = c.generation_id
                   AND c.tsv_content @@ plainto_tsquery('english', :query)
                 ORDER BY sparse_score DESC
@@ -200,6 +223,7 @@ class HybridRetrievalService:
                 {
                     "query": query,
                     "workspace_id": workspace_id,
+                    "active_gen_ids": active_gen_ids,
                     "limit_sparse": limit_sparse,
                 },
             )).mappings().all()
@@ -215,9 +239,9 @@ class HybridRetrievalService:
         for rank_idx, row in enumerate(sparse_rows, start=1):
             sparse_map[row["chunk_id"]] = (rank_idx, float(row["sparse_score"]), dict(row))
 
-        # 5. Exact Reciprocal Rank Fusion calculation
+        # 5. Exact Reciprocal Rank Fusion calculation with deterministic candidate set ordering
         # RRF(d) = I(d in dense)/(60 + rank_dense(d)) + I(d in sparse)/(60 + rank_sparse(d))
-        all_chunk_ids = set(dense_map.keys()).union(set(sparse_map.keys()))
+        all_chunk_ids = sorted(set(dense_map.keys()).union(set(sparse_map.keys())), key=str)
         candidates: List[RetrievedChunk] = []
 
         for cid in all_chunk_ids:

@@ -41,31 +41,36 @@
 
   async function handleQuerySubmit() {
     if (!queryText.trim() || isSubmitting || !$activeWorkspace) return;
+    const targetWorkspaceId = $activeWorkspace.id;
     isSubmitting = true;
     errorMessage = null;
 
-    const res = await api.executeRagQuery($activeWorkspace.id, queryText.trim(), topK);
+    const res = await api.executeRagQuery(targetWorkspaceId, queryText.trim(), topK);
     if (res.success && res.data) {
-      currentResponse = res.data;
-      // Prepend to history
-      historyItems = [
-        {
-          id: res.data.query_id,
-          workspace_id: $activeWorkspace.id,
-          user_id: null,
-          query_text: res.data.query_text,
-          answer: res.data.answer,
-          has_unverified_claims: res.data.has_unverified_claims,
-          retrieval_chunks_count: res.data.citations.length,
-          processing_time_ms: res.data.processing_time_ms,
-          created_at: res.data.created_at,
-          citations: res.data.citations,
-        },
-        ...historyItems,
-      ];
+      // Prevent stale response clobbering if user switched active workspace while query was in flight
+      if ($activeWorkspace?.id === targetWorkspaceId) {
+        currentResponse = res.data;
+        historyItems = [
+          {
+            id: res.data.query_id,
+            workspace_id: targetWorkspaceId,
+            user_id: null,
+            query_text: res.data.query_text,
+            answer: res.data.answer,
+            has_unverified_claims: res.data.has_unverified_claims,
+            retrieval_chunks_count: res.data.citations.length,
+            processing_time_ms: res.data.processing_time_ms,
+            created_at: res.data.created_at,
+            citations: res.data.citations,
+          },
+          ...historyItems,
+        ];
+      }
       queryText = "";
     } else {
-      errorMessage = res.error || "RAG query failed. Please check local LLM daemon.";
+      if ($activeWorkspace?.id === targetWorkspaceId) {
+        errorMessage = res.error || "RAG query failed. Please check local LLM daemon.";
+      }
     }
     isSubmitting = false;
   }

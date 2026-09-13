@@ -339,11 +339,11 @@ class IngestionWorker:
                             INSERT INTO document_chunks (
                                 id, workspace_id, document_id, generation_id, chunk_index,
                                 page_number, section_heading, token_count, text_content,
-                                tsv_content, embedding, model_name, model_version, created_at
+                                embedding, model_name, model_version, created_at
                             ) VALUES (
                                 :id, :workspace_id, :document_id, :generation_id, :chunk_index,
                                 :page_number, :section_heading, :token_count, :text_content,
-                                to_tsvector('english', :text_content), cast(:embedding as vector),
+                                cast(:embedding as vector),
                                 :model_name, :model_version, NOW()
                             )
                         """)
@@ -425,15 +425,20 @@ class IngestionWorker:
 
         except Exception as exc:
             logger.error("document_indexing_failed", document_id=str(document_id), error=str(exc))
-            # Mark generation and document as failed safely
+            # Mark generation and document as failed safely and purge partial chunks
             try:
                 async with AsyncSessionLocal() as db:
                     if gen_id:
+                        # Purge any partial chunks persisted for this failed generation to avoid storage leak
+                        del_chunks_stmt = delete(DocumentChunk).where(DocumentChunk.generation_id == gen_id)
+                        await db.execute(del_chunks_stmt)
+
                         gen = await db.get(DocumentIndexGeneration, gen_id)
                         if gen:
                             gen.status = "failed"
                             gen.stage = "failed"
                             gen.error_message = str(exc)
+                            gen.retired_at = datetime.now(timezone.utc)
                     doc = await db.get(Document, document_id)
                     if doc:
                         if doc.active_generation_id:
@@ -461,15 +466,15 @@ class IngestionWorker:
         self, db: AsyncSession, grace_period_hours: int = 1
     ) -> int:
         """
-        Safely delete retired generations older than grace period (default 1 hour).
+        Safely delete retired or failed generations older than grace period (default 1 hour).
         Row-locks documents to guarantee serialized, race-free GC.
         """
         threshold = datetime.now(timezone.utc) - timedelta(hours=grace_period_hours)
         
-        # Find candidate retired generations older than threshold
+        # Find candidate retired or failed generations older than threshold
         find_stmt = select(DocumentIndexGeneration).where(
-            DocumentIndexGeneration.status == "retired",
-            DocumentIndexGeneration.retired_at < threshold,
+            DocumentIndexGeneration.status.in_(["retired", "failed"]),
+            (DocumentIndexGeneration.retired_at < threshold) | (DocumentIndexGeneration.updated_at < threshold),
         )
         res = await db.execute(find_stmt)
         candidates = res.scalars().all()
