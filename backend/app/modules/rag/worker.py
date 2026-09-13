@@ -16,6 +16,7 @@ Handles:
 import asyncio
 import io
 import os
+import time
 import uuid
 from datetime import datetime, timezone, timedelta
 from typing import List, Optional
@@ -25,6 +26,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.core.database import AsyncSessionLocal
+from app.core.metrics import (
+    rag_chunks_created_total,
+    rag_documents_ingested_total,
+    rag_embeddings_created_total,
+    rag_generation_activation_total,
+    rag_generation_failures_total,
+    rag_generation_gc_total,
+    rag_ingestion_duration_seconds,
+    rag_ingestion_failures_total,
+    rag_lease_acquisition_failures_total,
+    rag_stale_worker_rejections_total,
+)
 from app.core.storage import get_storage
 from app.modules.documents.models import Document
 from app.modules.rag.models import (
@@ -100,6 +113,7 @@ class IngestionWorker:
             expires_at = expires_at.replace(tzinfo=timezone.utc)
 
         if expires_at > now and lease.worker_id != self.worker_id:
+            rag_lease_acquisition_failures_total.inc(reason="already_leased")
             await db.rollback()
             return None
 
@@ -122,7 +136,8 @@ class IngestionWorker:
         Extend lease duration if still held with matching fencing token.
         """
         now = datetime.now(timezone.utc)
-        new_expires = now + timedelta(seconds=self.settings.RAG_PROCESSING_LEASE_SECONDS)
+        lease_duration = timedelta(seconds=self.settings.RAG_PROCESSING_LEASE_SECONDS)
+        lease_expires_at = now + lease_duration
 
         stmt = (
             update(DocumentProcessingLease)
@@ -131,11 +146,14 @@ class IngestionWorker:
                 DocumentProcessingLease.worker_id == self.worker_id,
                 DocumentProcessingLease.fencing_token == fencing_token,
             )
-            .values(heartbeat_at=now, lease_expires_at=new_expires)
+            .values(
+                heartbeat_at=now,
+                lease_expires_at=lease_expires_at,
+            )
         )
-        result = await db.execute(stmt)
+        res = await db.execute(stmt)
         await db.commit()
-        return result.rowcount > 0
+        return res.rowcount > 0
 
     async def verify_fencing_ownership_barrier(
         self,
@@ -145,8 +163,10 @@ class IngestionWorker:
         generation_id: Optional[uuid.UUID] = None,
     ) -> None:
         """
-        Transactional ownership barrier.
-        Locks the lease row and asserts this worker holds the matching fencing token.
+        Transactional Ownership Barrier.
+        Must be invoked at the start of EVERY mutation transaction.
+        Row-locks the lease record using SELECT ... FOR UPDATE to guarantee that if another
+        worker has reclaimed the lease (incrementing fencing_token), this stale worker cannot proceed.
         Raises RuntimeError if lease was lost or reclaimed by another worker.
         """
         stmt = (
@@ -161,11 +181,13 @@ class IngestionWorker:
         res = await db.execute(stmt)
         lease = res.scalar_one_or_none()
         if lease is None:
+            rag_stale_worker_rejections_total.inc()
             raise RuntimeError(
                 f"Fencing ownership barrier violation: worker {self.worker_id} with token {fencing_token} "
                 f"no longer owns document {document_id}."
             )
         if generation_id is not None and lease.generation_id is not None and lease.generation_id != generation_id:
+            rag_stale_worker_rejections_total.inc()
             raise RuntimeError(
                 f"Fencing ownership barrier violation: lease generation mismatch for document {document_id}. "
                 f"Expected generation {generation_id}, found {lease.generation_id}."
@@ -191,6 +213,7 @@ class IngestionWorker:
         """
         Execute full indexing lifecycle for a document in a background worker session.
         """
+        t0 = time.perf_counter()
         gen_id: Optional[uuid.UUID] = None
         # Fetch document to obtain workspace_id before acquiring lease
         async with AsyncSessionLocal() as db:
@@ -294,6 +317,7 @@ class IngestionWorker:
                 target_tokens=500,
                 overlap_tokens=50,
             )
+            rag_chunks_created_total.inc(len(tokenized_chunks))
 
             async with AsyncSessionLocal() as db:
                 await self.verify_fencing_ownership_barrier(db, document_id, fencing_token, generation_id=gen_id)
@@ -309,6 +333,7 @@ class IngestionWorker:
                 batch = tokenized_chunks[i : i + batch_size]
                 batch_texts = [c.content for c in batch]
                 batch_embeddings = await self.embedding_model.embed_texts(batch_texts)
+                rag_embeddings_created_total.inc(len(batch_texts))
 
                 async with AsyncSessionLocal() as db:
                     # Transactional ownership barrier before mutating database
@@ -415,6 +440,10 @@ class IngestionWorker:
                 doc.status = "ready"
                 await db.commit()
 
+            rag_generation_activation_total.inc()
+            rag_documents_ingested_total.inc(status="success")
+            rag_ingestion_duration_seconds.observe(time.perf_counter() - t0)
+
             logger.info(
                 "document_indexed_successfully",
                 document_id=str(document_id),
@@ -424,6 +453,9 @@ class IngestionWorker:
             return gen_id
 
         except Exception as exc:
+            rag_documents_ingested_total.inc(status="failure")
+            rag_generation_failures_total.inc(reason="indexing_error")
+            rag_ingestion_failures_total.inc(stage="indexing")
             logger.error("document_indexing_failed", document_id=str(document_id), error=str(exc))
             # Mark generation and document as failed safely and purge partial chunks
             try:
@@ -502,5 +534,8 @@ class IngestionWorker:
                 deleted_count += 1
             else:
                 await db.rollback()
+
+        if deleted_count > 0:
+            rag_generation_gc_total.inc(deleted_count)
 
         return deleted_count

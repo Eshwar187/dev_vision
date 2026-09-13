@@ -9,8 +9,10 @@ from app.api.dependencies import (
     require_workspace_member,
     verify_csrf_token,
 )
+from app.core.config import get_settings
 from app.core.database import get_db
 from app.core.exceptions import FileTooLargeException, ValidationException
+from app.core.limiter import rate_limit
 from app.core.storage import get_storage
 from app.modules.documents.schemas import (
     DocumentDeleteResponse,
@@ -29,7 +31,10 @@ router = APIRouter(prefix="/workspaces/{workspace_id}/documents", tags=["Documen
     "",
     response_model=DocumentResponse,
     status_code=status.HTTP_201_CREATED,
-    dependencies=[Depends(verify_csrf_token)],
+    dependencies=[
+        Depends(verify_csrf_token),
+        Depends(rate_limit("upload_document", lambda: get_settings().RATE_LIMIT_UPLOADS_PER_MINUTE)),
+    ],
     summary="Upload a new document to workspace",
 )
 async def upload_document(

@@ -1,4 +1,4 @@
-﻿import uuid
+import uuid
 from datetime import datetime, timezone
 from typing import AsyncGenerator
 from sqlalchemy import DateTime, text
@@ -84,13 +84,37 @@ async def check_db_health() -> bool:
 
 
 async def check_pgvector_installed() -> bool:
-    """Checks if the pgvector extension is present in PostgreSQL."""
+    """Checks if the pgvector extension is present in PostgreSQL (skipped gracefully on SQLite)."""
     try:
         async with AsyncSessionLocal() as session:
+            # If running in SQLite mode (e.g. testing), pgvector is simulated
+            if session.bind and session.bind.dialect.name == "sqlite":
+                return True
             result = await session.execute(
                 text("SELECT extname FROM pg_extension WHERE extname = 'vector'")
             )
             return result.scalar() == "vector"
     except Exception as exc:
         logger.error("pgvector check failed", error=str(exc))
+        return False
+
+
+async def check_migrations_ready() -> bool:
+    """Verifies that database schema / migrations have been applied."""
+    try:
+        async with AsyncSessionLocal() as session:
+            bind = session.bind
+            if bind and bind.dialect.name == "sqlite":
+                # In SQLite test environments, check that core tables exist
+                res = await session.execute(
+                    text("SELECT name FROM sqlite_master WHERE type='table' AND name='documents'")
+                )
+                return res.scalar() == "documents"
+            # On PostgreSQL, verify alembic_version table has applied revisions
+            result = await session.execute(
+                text("SELECT version_num FROM alembic_version LIMIT 1")
+            )
+            return result.scalar() is not None
+    except Exception as exc:
+        logger.warning("migration check failed", error=str(exc))
         return False

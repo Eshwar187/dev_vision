@@ -49,6 +49,8 @@ export interface ProbeResult<T> {
   data: T | null;
   error: string | null;
   errorCode?: string;
+  statusCode?: number;
+  retryAfterSeconds?: number;
   latencyMs: number;
   requestId: string | null;
 }
@@ -102,6 +104,8 @@ export class ApiClient {
 
       const latencyMs = Math.round(performance.now() - start);
       const requestId = res.headers.get("x-request-id");
+      const retryAfterHeader = res.headers.get("retry-after");
+      const retryAfterSeconds = retryAfterHeader ? parseInt(retryAfterHeader, 10) : undefined;
 
       if (!res.ok) {
         const errorEnvelope: ErrorEnvelope | null = await res.json().catch(() => null);
@@ -112,6 +116,8 @@ export class ApiClient {
           data: null,
           error: errorMessage,
           errorCode,
+          statusCode: res.status,
+          retryAfterSeconds,
           latencyMs,
           requestId,
         };
@@ -122,6 +128,7 @@ export class ApiClient {
         success: true,
         data,
         error: null,
+        statusCode: res.status,
         latencyMs,
         requestId,
       };
@@ -131,6 +138,7 @@ export class ApiClient {
         success: false,
         data: null,
         error: err?.message || "Network error. Is FastAPI running on http://localhost:8000?",
+        statusCode: 0,
         latencyMs,
         requestId: null,
       };

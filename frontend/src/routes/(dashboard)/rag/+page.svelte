@@ -16,6 +16,11 @@
   let selectedCitation: RagCitation | null = null;
   let isDrawerOpen = false;
 
+  // Operational resilience UI state
+  let rateLimitRetryAfter: number | null = null;
+  let isTimeoutError = false;
+  let lastSubmittedQuery = "";
+
   onMount(async () => {
     if ($activeWorkspace) {
       await loadHistory();
@@ -42,10 +47,14 @@
   async function handleQuerySubmit() {
     if (!queryText.trim() || isSubmitting || !$activeWorkspace) return;
     const targetWorkspaceId = $activeWorkspace.id;
+    const currentQuery = queryText.trim();
+    lastSubmittedQuery = currentQuery;
     isSubmitting = true;
     errorMessage = null;
+    rateLimitRetryAfter = null;
+    isTimeoutError = false;
 
-    const res = await api.executeRagQuery(targetWorkspaceId, queryText.trim(), topK);
+    const res = await api.executeRagQuery(targetWorkspaceId, currentQuery, topK);
     if (res.success && res.data) {
       // Prevent stale response clobbering if user switched active workspace while query was in flight
       if ($activeWorkspace?.id === targetWorkspaceId) {
@@ -69,10 +78,27 @@
       queryText = "";
     } else {
       if ($activeWorkspace?.id === targetWorkspaceId) {
-        errorMessage = res.error || "RAG query failed. Please check local LLM daemon.";
+        if (res.statusCode === 429) {
+          rateLimitRetryAfter = res.retryAfterSeconds || 30;
+          errorMessage = `Rate limit exceeded (30 queries/minute). Please wait ${rateLimitRetryAfter}s before retrying.`;
+        } else if (res.statusCode === 504) {
+          isTimeoutError = true;
+          errorMessage = "Query timed out. The local LLM inference took longer than 60 seconds.";
+        } else if (res.statusCode === 0) {
+          errorMessage = "DevVision backend service is unreachable. Ensure the FastAPI and LLM daemons are running.";
+        } else {
+          errorMessage = res.error || "RAG query failed. Please check local LLM daemon.";
+        }
       }
     }
     isSubmitting = false;
+  }
+
+  function retryLastQuery() {
+    if (lastSubmittedQuery) {
+      queryText = lastSubmittedQuery;
+      handleQuerySubmit();
+    }
   }
 
   function handleKeydown(event: KeyboardEvent) {
@@ -119,8 +145,31 @@
       <p class="text-xs text-amber-200/80 mt-1">Please select or create a workspace to query indexed documentation.</p>
     </div>
   {:else}
-    <!-- Error Alert -->
-    {#if errorMessage}
+    <!-- Rate Limit Exceeded Alert -->
+    {#if rateLimitRetryAfter !== null}
+      <div class="p-4 rounded-xl bg-amber-950/40 border border-amber-800/80 text-amber-300 text-sm flex items-center justify-between">
+        <div class="flex items-center gap-3">
+          <span class="px-2 py-0.5 text-xs font-semibold bg-amber-900/60 rounded text-amber-200 border border-amber-700/50">429 RATE LIMIT</span>
+          <span>{errorMessage}</span>
+        </div>
+        <button on:click={() => { rateLimitRetryAfter = null; errorMessage = null; }} class="text-xs text-amber-400 hover:underline">Dismiss</button>
+      </div>
+    {:else if isTimeoutError}
+      <!-- Gateway Timeout Alert -->
+      <div class="p-4 rounded-xl bg-orange-950/40 border border-orange-800/80 text-orange-300 text-sm flex items-center justify-between">
+        <div class="flex items-center gap-3">
+          <span class="px-2 py-0.5 text-xs font-semibold bg-orange-900/60 rounded text-orange-200 border border-orange-700/50">504 TIMEOUT</span>
+          <span>{errorMessage}</span>
+        </div>
+        <div class="flex items-center gap-3">
+          <button on:click={retryLastQuery} class="text-xs px-2.5 py-1 bg-orange-900/80 hover:bg-orange-800 text-orange-200 rounded-md font-medium border border-orange-700">
+            Retry Query
+          </button>
+          <button on:click={() => { isTimeoutError = false; errorMessage = null; }} class="text-xs text-orange-400 hover:underline">Dismiss</button>
+        </div>
+      </div>
+    {:else if errorMessage}
+      <!-- General Error Alert -->
       <div class="p-4 rounded-xl bg-rose-950/40 border border-rose-800/80 text-rose-300 text-sm flex items-center justify-between">
         <span>{errorMessage}</span>
         <button on:click={() => (errorMessage = null)} class="text-xs text-rose-400 hover:underline">Dismiss</button>

@@ -1,7 +1,47 @@
-﻿import logging
+import logging
 import sys
+from typing import Any, Dict, MutableMapping
 import structlog
 from app.core.config import get_settings
+
+SENSITIVE_KEYS = {
+    "password",
+    "password_hash",
+    "secret",
+    "secret_key",
+    "token",
+    "access_token",
+    "refresh_token",
+    "session_token",
+    "csrf_token",
+    "authorization",
+    "api_key",
+    "cookie",
+    "cookies",
+    "file_bytes",
+    "prompt",
+    "raw_prompt",
+    "text_content",
+    "embedding",
+    "embeddings",
+}
+
+
+def sanitize_sensitive_data(
+    logger: logging.Logger, method_name: str, event_dict: MutableMapping[str, Any]
+) -> MutableMapping[str, Any]:
+    """Sanitizes credentials, raw prompts, document text, and embeddings from structured logs."""
+    for key in list(event_dict.keys()):
+        key_lower = key.lower()
+        if key_lower in SENSITIVE_KEYS or any(s in key_lower for s in ("password", "secret", "token", "auth")):
+            if key not in ("request_id", "fencing_token"):  # Allow opaque tracking identifiers
+                event_dict[key] = "[REDACTED]"
+        elif key in ("document_content", "passage", "passages", "excerpt"):
+            # Never log full document bodies or context passages
+            val = event_dict[key]
+            if isinstance(val, str) and len(val) > 100:
+                event_dict[key] = f"[TRUNCATED {len(val)} chars]"
+    return event_dict
 
 
 def setup_logging() -> None:
@@ -15,6 +55,7 @@ def setup_logging() -> None:
         structlog.stdlib.add_log_level,
         structlog.stdlib.PositionalArgumentsFormatter(),
         structlog.processors.TimeStamper(fmt="iso"),
+        sanitize_sensitive_data,
         structlog.processors.StackInfoRenderer(),
         structlog.processors.format_exc_info,
         structlog.processors.UnicodeDecoder(),

@@ -1,21 +1,39 @@
 ﻿# ==============================================================================
-# DevVision AI — Frontend Dockerfile
+# DevVision AI — Production Frontend Dockerfile (Multi-Stage Build & Serve)
 # ==============================================================================
 
-FROM node:20-alpine AS base
+# Stage 1: Build SvelteKit static / production build
+FROM node:20-alpine AS builder
 
 WORKDIR /app
 
 RUN apk add --no-cache curl
 
 COPY frontend/package*.json ./
-RUN npm install
+RUN npm ci
 
 COPY frontend/ ./
+RUN npm run check && npm run build
 
-EXPOSE 5173
+# Stage 2: Minimal static / production runner
+FROM node:20-alpine AS runner
 
-HEALTHCHECK --interval=20s --timeout=5s --start-period=15s --retries=3 \
-    CMD curl -f http://localhost:5173 || exit 1
+WORKDIR /app
 
-CMD ["npm", "run", "dev", "--", "--host", "0.0.0.0", "--port", "5173"]
+RUN apk add --no-cache curl
+
+COPY frontend/package*.json ./
+RUN npm ci --omit=dev
+
+COPY --from=builder /app/build ./build
+COPY --from=builder /app/package.json ./
+
+USER node
+
+EXPOSE 3000
+
+ENV PORT=3000 \
+    HOST=0.0.0.0 \
+    NODE_ENV=production
+
+CMD ["node", "build"]

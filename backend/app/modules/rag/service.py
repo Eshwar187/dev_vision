@@ -23,6 +23,13 @@ from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
+from app.core.metrics import (
+    rag_citation_validation_failures_total,
+    rag_llm_generation_duration_seconds,
+    rag_query_duration_seconds,
+    rag_query_total,
+    rag_safe_refusals_total,
+)
 from app.modules.rag.models import RagQuery, RagQueryCitation, DocumentChunk
 from app.modules.rag.protocols import EmbeddingModel, RerankerModel, LanguageModel
 from app.modules.rag.retrieval import HybridRetrievalService, RetrievedChunk
@@ -130,7 +137,12 @@ class RagService:
         # If no context found in workspace
         if not retrieved_chunks:
             no_info_ans = "Based on the provided documents, I do not have enough information to answer this question as no relevant documents were found in this workspace."
-            duration_ms = int((time.perf_counter() - start_time) * 1000)
+            duration_s = time.perf_counter() - start_time
+            duration_ms = int(duration_s * 1000)
+            rag_safe_refusals_total.inc()
+            rag_query_total.inc(status="refusal_no_context")
+            rag_query_duration_seconds.observe(duration_s)
+
             rag_query = RagQuery(
                 workspace_id=workspace_id,
                 user_id=user_id,
@@ -152,42 +164,54 @@ class RagService:
         user_prompt = USER_PROMPT_TEMPLATE.format(context_passages=context_str, query=query_text)
 
         # 3. First LLM generation attempt
+        t_llm = time.perf_counter()
         answer = await self.language_model.generate_response(
             system_prompt=sys_prompt,
             user_prompt=user_prompt,
             temperature=0.2,
             max_tokens=1024,
         )
+        rag_llm_generation_duration_seconds.observe(time.perf_counter() - t_llm)
 
         # 4. Validate citations
         report = self.citation_validator.validate(answer, context_map)
 
         # 5. Remediation step if violations detected (single retry)
-        if not report.is_valid and report.remediation_prompt:
-            logger.info("remediating_citation_violations", query=query_text[:50])
-            remediation_user_prompt = (
-                f"{user_prompt}\n\n[Previous Attempt]\n{answer}\n\n[Remediation Feedback]\n{report.remediation_prompt}"
+        if not report.is_valid:
+            rag_citation_validation_failures_total.inc(
+                reason="unverified_claims" if report.has_unverified_claims else "missing_citations"
             )
-            remediated_answer = await self.language_model.generate_response(
-                system_prompt=sys_prompt,
-                user_prompt=remediation_user_prompt,
-                temperature=0.1,
-                max_tokens=1024,
-            )
-            # Re-validate remediated answer
-            remediation_report = self.citation_validator.validate(remediated_answer, context_map)
-            if remediation_report.is_valid:
-                answer = remediated_answer
-                report = remediation_report
-            else:
-                # Still invalid after single remediation -> safe rejection fallback
-                answer = (
-                    "Based on the provided documents, I cannot provide a fully verified answer with accurate citations. "
-                    "Some claims could not be verified directly from the source texts."
+            if report.remediation_prompt:
+                logger.info("remediating_citation_violations", query=query_text[:50])
+                remediation_user_prompt = (
+                    f"{user_prompt}\n\n[Previous Attempt]\n{answer}\n\n[Remediation Feedback]\n{report.remediation_prompt}"
                 )
-                report.has_unverified_claims = True
+                t_remed = time.perf_counter()
+                remediated_answer = await self.language_model.generate_response(
+                    system_prompt=sys_prompt,
+                    user_prompt=remediation_user_prompt,
+                    temperature=0.1,
+                    max_tokens=1024,
+                )
+                rag_llm_generation_duration_seconds.observe(time.perf_counter() - t_remed)
+                # Re-validate remediated answer
+                remediation_report = self.citation_validator.validate(remediated_answer, context_map)
+                if remediation_report.is_valid:
+                    answer = remediated_answer
+                    report = remediation_report
+                else:
+                    # Still invalid after single remediation -> safe rejection fallback
+                    answer = (
+                        "Based on the provided documents, I cannot provide a fully verified answer with accurate citations. "
+                        "Some claims could not be verified directly from the source texts."
+                    )
+                    report.has_unverified_claims = True
+                    rag_safe_refusals_total.inc()
 
-        duration_ms = int((time.perf_counter() - start_time) * 1000)
+        duration_s = time.perf_counter() - start_time
+        duration_ms = int(duration_s * 1000)
+        rag_query_duration_seconds.observe(duration_s)
+        rag_query_total.inc(status="success")
 
         # 6. Persist RagQuery and immutable RagQueryCitation snapshots
         rag_query = RagQuery(

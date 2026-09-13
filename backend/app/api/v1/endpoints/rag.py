@@ -21,13 +21,16 @@ from app.api.dependencies import (
     require_workspace_role,
     verify_csrf_token,
 )
+from app.core.config import get_settings
 from app.core.database import get_db
 from app.core.exceptions import (
     DocumentNotFoundException,
     EntityNotFoundException,
     ValidationException,
     AuthorizationException,
+    TimeoutException,
 )
+from app.core.limiter import rate_limit
 from app.modules.identity.models import User
 from app.modules.workspaces.models import WorkspaceMembership
 from app.modules.documents.models import Document
@@ -70,7 +73,10 @@ def get_ingestion_worker() -> IngestionWorker:
     "/rag/query",
     response_model=RagQueryResponse,
     status_code=status.HTTP_200_OK,
-    dependencies=[Depends(verify_csrf_token)],
+    dependencies=[
+        Depends(verify_csrf_token),
+        Depends(rate_limit("rag_query", lambda: get_settings().RATE_LIMIT_RAG_QUERIES_PER_MINUTE)),
+    ],
     summary="Execute RAG query against workspace documents",
 )
 async def execute_rag_query(
@@ -85,17 +91,34 @@ async def execute_rag_query(
     Executes hybrid dense + sparse retrieval and generates an LLM response with citations.
     Enforces sentence-level citation verification with automatic single retry remediation.
     """
+    settings = get_settings()
     clean_query = payload.query.strip()
     if len(clean_query) < 2:
         raise ValidationException("Query must be at least 2 characters long.")
+    if len(clean_query) > settings.MAX_QUERY_LENGTH_CHARS:
+        raise ValidationException(
+            f"Query length ({len(clean_query)} chars) exceeds maximum allowed limit of {settings.MAX_QUERY_LENGTH_CHARS} characters."
+        )
+    if payload.top_k > settings.MAX_RETRIEVAL_CANDIDATES:
+        raise ValidationException(
+            f"top_k ({payload.top_k}) exceeds maximum permitted candidates ({settings.MAX_RETRIEVAL_CANDIDATES})."
+        )
 
-    result = await rag_service.execute_query(
-        db=db,
-        workspace_id=workspace_id,
-        user_id=current_user.id,
-        query_text=clean_query,
-        top_k=payload.top_k,
-    )
+    try:
+        result = await asyncio.wait_for(
+            rag_service.execute_query(
+                db=db,
+                workspace_id=workspace_id,
+                user_id=current_user.id,
+                query_text=clean_query,
+                top_k=payload.top_k,
+            ),
+            timeout=float(settings.RAG_QUERY_TIMEOUT_SECONDS),
+        )
+    except asyncio.TimeoutError:
+        raise TimeoutException(
+            f"RAG query execution exceeded timeout threshold of {settings.RAG_QUERY_TIMEOUT_SECONDS}s."
+        )
 
     citations_out = [
         RagCitationOut(
@@ -187,7 +210,10 @@ async def get_rag_history(
     "/documents/{document_id}/reindex",
     response_model=ReindexResponse,
     status_code=status.HTTP_202_ACCEPTED,
-    dependencies=[Depends(verify_csrf_token)],
+    dependencies=[
+        Depends(verify_csrf_token),
+        Depends(rate_limit("reindex", lambda: get_settings().RATE_LIMIT_REINDEX_PER_MINUTE)),
+    ],
     summary="Trigger zero-downtime document reindexing (Admin/Owner only)",
 )
 async def reindex_document(

@@ -13,6 +13,7 @@ Deterministic Tie-Breaking:
     ORDER BY rrf_score DESC, rank_dense ASC NULLS LAST, rank_sparse ASC NULLS LAST, chunk_id ASC
 """
 
+import time
 import uuid
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
@@ -21,6 +22,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 import structlog
 
 from app.core.config import get_settings
+from app.core.metrics import (
+    rag_dense_retrieval_duration_seconds,
+    rag_rerank_duration_seconds,
+    rag_sparse_retrieval_duration_seconds,
+)
 from app.modules.rag.protocols import EmbeddingModel, RerankerModel
 
 logger = structlog.get_logger(__name__)
@@ -104,6 +110,7 @@ class HybridRetrievalService:
         # 3. Dense & Sparse candidate search pinned strictly to active_gen_ids snapshot
         dialect_name = db.bind.dialect.name if db.bind else "postgresql"
 
+        t_dense = time.perf_counter()
         if dialect_name == "sqlite":
             stmt_dense = (
                 select(
@@ -129,7 +136,9 @@ class HybridRetrievalService:
                 .limit(limit_dense)
             )
             dense_rows = (await db.execute(stmt_dense)).mappings().all()
+            rag_dense_retrieval_duration_seconds.observe(time.perf_counter() - t_dense)
 
+            t_sparse = time.perf_counter()
             stmt_sparse = (
                 select(
                     DocumentChunk.id.label("chunk_id"),
@@ -154,6 +163,7 @@ class HybridRetrievalService:
                 .limit(limit_sparse)
             )
             sparse_rows = (await db.execute(stmt_sparse)).mappings().all()
+            rag_sparse_retrieval_duration_seconds.observe(time.perf_counter() - t_sparse)
         else:
             # PostgreSQL + pgvector query
             # Increase HNSW ef_search for transactional query to avoid recall exhaustion under filtered workspaces
@@ -194,7 +204,9 @@ class HybridRetrievalService:
                     "limit_dense": limit_dense,
                 },
             )).mappings().all()
+            rag_dense_retrieval_duration_seconds.observe(time.perf_counter() - t_dense)
 
+            t_sparse = time.perf_counter()
             sparse_sql = text("""
                 SELECT 
                     c.id AS chunk_id,
@@ -227,6 +239,7 @@ class HybridRetrievalService:
                     "limit_sparse": limit_sparse,
                 },
             )).mappings().all()
+            rag_sparse_retrieval_duration_seconds.observe(time.perf_counter() - t_sparse)
 
         # 4. Compute 1-indexed ranks
         # dense_ranks: chunk_id -> (rank_1_indexed, similarity, row_data)
@@ -294,10 +307,12 @@ class HybridRetrievalService:
         # 7. Optional Cross-Encoder Reranking
         settings = get_settings()
         if apply_reranker and settings.RERANKER_ENABLED and self.reranker_model and candidates:
+            t_rerank = time.perf_counter()
             # Take top candidate pool for reranking (e.g. up to top 20 from RRF)
             rerank_pool = candidates[:20]
             passages = [c.content for c in rerank_pool]
             rerank_results = await self.reranker_model.rerank(query, passages, top_k=top_k)
+            rag_rerank_duration_seconds.observe(time.perf_counter() - t_rerank)
 
             reranked_chunks: List[RetrievedChunk] = []
             for rank_pos, (orig_idx, score) in enumerate(rerank_results, start=1):

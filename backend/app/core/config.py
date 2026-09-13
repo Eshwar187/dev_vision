@@ -100,6 +100,23 @@ class Settings(BaseSettings):
     RAG_PROCESSING_LEASE_SECONDS: int = 60
     RAG_PROCESSING_HEARTBEAT_SECONDS: int = 15
 
+    # Resource Limits & Timeouts (Phase 4 Hardening)
+    MAX_UPLOAD_SIZE_BYTES: int = 20 * 1024 * 1024  # 20 MB
+    MAX_EXTRACTED_TEXT_BYTES: int = 10 * 1024 * 1024  # 10 MB
+    MAX_DOCUMENT_PAGES: int = 500
+    MAX_CHUNKS_PER_DOCUMENT: int = 2000
+    MAX_QUERY_LENGTH_CHARS: int = 2000
+    MAX_RETRIEVAL_CANDIDATES: int = 100
+    MAX_CONCURRENT_INGESTION_JOBS: int = 5
+    MAX_EMBEDDING_BATCH_SIZE: int = 64
+    RAG_QUERY_TIMEOUT_SECONDS: int = 60
+
+    # Rate Limiting (Phase 4 Operational Resilience)
+    RATE_LIMIT_ENABLED: bool = True
+    RATE_LIMIT_RAG_QUERIES_PER_MINUTE: int = 30
+    RATE_LIMIT_UPLOADS_PER_MINUTE: int = 10
+    RATE_LIMIT_REINDEX_PER_MINUTE: int = 5
+
     # Logging
     LOG_LEVEL: str = "INFO"
     LOG_FORMAT: str = "json"  # "json" or "console"

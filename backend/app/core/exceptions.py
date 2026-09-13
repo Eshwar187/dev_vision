@@ -259,6 +259,38 @@ def build_error_response(
     )
 
 
+class RateLimitException(AppException):
+    """Raised when an operation exceeds its configured rate limit."""
+
+    def __init__(
+        self,
+        message: str = "Rate limit exceeded. Please try again later.",
+        retry_after: int = 60,
+        details: Optional[Dict[str, Any]] = None,
+    ):
+        d = details or {}
+        d["retry_after"] = retry_after
+        super().__init__(
+            message=message,
+            code="RATE_LIMIT_EXCEEDED",
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            details=d,
+        )
+        self.retry_after = retry_after
+
+
+class TimeoutException(AppException):
+    """Raised when an operation or local AI inference times out."""
+
+    def __init__(self, message: str = "The requested operation timed out.", details: Optional[Dict[str, Any]] = None):
+        super().__init__(
+            message=message,
+            code="REQUEST_TIMEOUT",
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            details=details,
+        )
+
+
 async def app_exception_handler(request: Request, exc: AppException) -> JSONResponse:
     request_id = getattr(request.state, "request_id", str(uuid.uuid4()))
     # Do not log invalid credentials at warning level in normal production
@@ -277,13 +309,16 @@ async def app_exception_handler(request: Request, exc: AppException) -> JSONResp
             request_id=request_id,
             details=exc.details,
         )
-    return build_error_response(
+    resp = build_error_response(
         code=exc.code,
         message=exc.message,
         status_code=exc.status_code,
         request_id=request_id,
         details=exc.details,
     )
+    if hasattr(exc, "retry_after") and exc.retry_after:
+        resp.headers["Retry-After"] = str(exc.retry_after)
+    return resp
 
 
 async def validation_exception_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
