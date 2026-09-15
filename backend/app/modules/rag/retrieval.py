@@ -77,11 +77,17 @@ class HybridRetrievalService:
         limit_sparse: int = 20,
         top_k: int = 5,
         apply_reranker: bool = True,
+        retrieval_mode: str = "hybrid_rrf",
     ) -> List[RetrievedChunk]:
         """
         Execute hybrid retrieval for a given workspace query.
         Scoped exclusively to documents in the specified workspace whose status is 'ready'
         and chunks belong to the active_generation_id of the document.
+
+        Supported retrieval_mode options (used for evaluation ablation without altering production defaults):
+        - "hybrid_rrf": Standard hybrid dense + sparse with RRF fusion and optional reranking (default).
+        - "dense_only": Pure semantic search using pgvector cosine similarity.
+        - "sparse_only": Pure lexical search using PostgreSQL tsvector full-text search.
         """
         from app.modules.documents.models import Document
         from app.modules.rag.models import DocumentChunk
@@ -114,135 +120,161 @@ class HybridRetrievalService:
         except Exception:
             dialect_name = "postgresql"
 
-        t_dense = time.perf_counter()
-        if dialect_name == "sqlite":
-            stmt_dense = (
-                select(
-                    DocumentChunk.id.label("chunk_id"),
-                    DocumentChunk.document_id,
-                    DocumentChunk.generation_id,
-                    Document.original_filename.label("document_name"),
-                    DocumentChunk.chunk_index,
-                    DocumentChunk.text_content.label("content"),
-                    DocumentChunk.page_number,
-                    DocumentChunk.section_heading,
-                    DocumentChunk.token_count,
-                    literal(1.0).label("dense_score"),
+        dense_rows = []
+        sparse_rows = []
+
+        if retrieval_mode != "sparse_only":
+            t_dense = time.perf_counter()
+            if dialect_name == "sqlite":
+                # Compute cosine similarity against query_vector in Python for SQLite test environments
+                stmt_dense = (
+                    select(
+                        DocumentChunk.id.label("chunk_id"),
+                        DocumentChunk.document_id,
+                        DocumentChunk.generation_id,
+                        Document.original_filename.label("document_name"),
+                        DocumentChunk.chunk_index,
+                        DocumentChunk.text_content.label("content"),
+                        DocumentChunk.page_number,
+                        DocumentChunk.section_heading,
+                        DocumentChunk.token_count,
+                        DocumentChunk.embedding,
+                    )
+                    .join(Document, DocumentChunk.document_id == Document.id)
+                    .where(
+                        DocumentChunk.workspace_id == workspace_id,
+                        Document.workspace_id == workspace_id,
+                        Document.status == "ready",
+                        DocumentChunk.generation_id.in_(active_gen_ids),
+                        Document.active_generation_id == DocumentChunk.generation_id,
+                    )
                 )
-                .join(Document, DocumentChunk.document_id == Document.id)
-                .where(
-                    DocumentChunk.workspace_id == workspace_id,
-                    Document.workspace_id == workspace_id,
-                    Document.status == "ready",
-                    DocumentChunk.generation_id.in_(active_gen_ids),
-                    Document.active_generation_id == DocumentChunk.generation_id,
-                )
-                .limit(limit_dense)
-            )
-            dense_rows = (await db.execute(stmt_dense)).mappings().all()
+                raw_dense = (await db.execute(stmt_dense)).mappings().all()
+                scored_dense = []
+                for r in raw_dense:
+                    c_dict = dict(r)
+                    emb = c_dict.pop("embedding", None)
+                    sim = 0.0
+                    if emb and isinstance(emb, (list, tuple)) and len(emb) == len(query_vector):
+                        dot = sum(a * b for a, b in zip(emb, query_vector))
+                        sim = max(0.0, min(1.0, dot))
+                    c_dict["dense_score"] = sim
+                    scored_dense.append(c_dict)
+                scored_dense.sort(key=lambda x: x["dense_score"], reverse=True)
+                dense_rows = scored_dense[:limit_dense]
+            else:
+                # PostgreSQL + pgvector query
+                # Increase HNSW ef_search for transactional query to avoid recall exhaustion under filtered workspaces
+                try:
+                    await db.execute(text("SET LOCAL hnsw.ef_search = 100;"))
+                except Exception:
+                    pass
+
+                dense_sql = text("""
+                    SELECT 
+                        c.id AS chunk_id,
+                        c.document_id,
+                        c.generation_id,
+                        d.original_filename AS document_name,
+                        c.chunk_index,
+                        c.text_content AS content,
+                        c.page_number,
+                        c.section_heading,
+                        c.token_count,
+                        (1 - (c.embedding <=> cast(:query_vector as vector))) AS dense_score
+                    FROM document_chunks c
+                    JOIN documents d ON c.document_id = d.id
+                    WHERE c.workspace_id = :workspace_id
+                      AND d.workspace_id = :workspace_id
+                      AND d.status = 'ready'
+                      AND c.generation_id = ANY(:active_gen_ids)
+                      AND d.active_generation_id = c.generation_id
+                      AND c.embedding IS NOT NULL
+                    ORDER BY c.embedding <=> cast(:query_vector as vector) ASC
+                    LIMIT :limit_dense
+                """)
+                dense_rows = (await db.execute(
+                    dense_sql,
+                    {
+                        "query_vector": vector_str,
+                        "workspace_id": workspace_id,
+                        "active_gen_ids": active_gen_ids,
+                        "limit_dense": limit_dense,
+                    },
+                )).mappings().all()
             rag_dense_retrieval_duration_seconds.observe(time.perf_counter() - t_dense)
 
+        if retrieval_mode != "dense_only":
             t_sparse = time.perf_counter()
-            stmt_sparse = (
-                select(
-                    DocumentChunk.id.label("chunk_id"),
-                    DocumentChunk.document_id,
-                    DocumentChunk.generation_id,
-                    Document.original_filename.label("document_name"),
-                    DocumentChunk.chunk_index,
-                    DocumentChunk.text_content.label("content"),
-                    DocumentChunk.page_number,
-                    DocumentChunk.section_heading,
-                    DocumentChunk.token_count,
-                    literal(1.0).label("sparse_score"),
+            if dialect_name == "sqlite":
+                # Keyword matching against query tokens for SQLite test environments
+                stmt_sparse = (
+                    select(
+                        DocumentChunk.id.label("chunk_id"),
+                        DocumentChunk.document_id,
+                        DocumentChunk.generation_id,
+                        Document.original_filename.label("document_name"),
+                        DocumentChunk.chunk_index,
+                        DocumentChunk.text_content.label("content"),
+                        DocumentChunk.page_number,
+                        DocumentChunk.section_heading,
+                        DocumentChunk.token_count,
+                    )
+                    .join(Document, DocumentChunk.document_id == Document.id)
+                    .where(
+                        DocumentChunk.workspace_id == workspace_id,
+                        Document.workspace_id == workspace_id,
+                        Document.status == "ready",
+                        DocumentChunk.generation_id.in_(active_gen_ids),
+                        Document.active_generation_id == DocumentChunk.generation_id,
+                    )
                 )
-                .join(Document, DocumentChunk.document_id == Document.id)
-                .where(
-                    DocumentChunk.workspace_id == workspace_id,
-                    Document.workspace_id == workspace_id,
-                    Document.status == "ready",
-                    DocumentChunk.generation_id.in_(active_gen_ids),
-                    Document.active_generation_id == DocumentChunk.generation_id,
-                )
-                .limit(limit_sparse)
-            )
-            sparse_rows = (await db.execute(stmt_sparse)).mappings().all()
-            rag_sparse_retrieval_duration_seconds.observe(time.perf_counter() - t_sparse)
-        else:
-            # PostgreSQL + pgvector query
-            # Increase HNSW ef_search for transactional query to avoid recall exhaustion under filtered workspaces
-            try:
-                await db.execute(text("SET LOCAL hnsw.ef_search = 100;"))
-            except Exception:
-                pass
-
-            dense_sql = text("""
-                SELECT 
-                    c.id AS chunk_id,
-                    c.document_id,
-                    c.generation_id,
-                    d.original_filename AS document_name,
-                    c.chunk_index,
-                    c.text_content AS content,
-                    c.page_number,
-                    c.section_heading,
-                    c.token_count,
-                    (1 - (c.embedding <=> cast(:query_vector as vector))) AS dense_score
-                FROM document_chunks c
-                JOIN documents d ON c.document_id = d.id
-                WHERE c.workspace_id = :workspace_id
-                  AND d.workspace_id = :workspace_id
-                  AND d.status = 'ready'
-                  AND c.generation_id = ANY(:active_gen_ids)
-                  AND d.active_generation_id = c.generation_id
-                  AND c.embedding IS NOT NULL
-                ORDER BY c.embedding <=> cast(:query_vector as vector) ASC
-                LIMIT :limit_dense
-            """)
-            dense_rows = (await db.execute(
-                dense_sql,
-                {
-                    "query_vector": vector_str,
-                    "workspace_id": workspace_id,
-                    "active_gen_ids": active_gen_ids,
-                    "limit_dense": limit_dense,
-                },
-            )).mappings().all()
-            rag_dense_retrieval_duration_seconds.observe(time.perf_counter() - t_dense)
-
-            t_sparse = time.perf_counter()
-            sparse_sql = text("""
-                SELECT 
-                    c.id AS chunk_id,
-                    c.document_id,
-                    c.generation_id,
-                    d.original_filename AS document_name,
-                    c.chunk_index,
-                    c.text_content AS content,
-                    c.page_number,
-                    c.section_heading,
-                    c.token_count,
-                    ts_rank(c.tsv_content, plainto_tsquery('english', :query)) AS sparse_score
-                FROM document_chunks c
-                JOIN documents d ON c.document_id = d.id
-                WHERE c.workspace_id = :workspace_id
-                  AND d.workspace_id = :workspace_id
-                  AND d.status = 'ready'
-                  AND c.generation_id = ANY(:active_gen_ids)
-                  AND d.active_generation_id = c.generation_id
-                  AND c.tsv_content @@ plainto_tsquery('english', :query)
-                ORDER BY sparse_score DESC
-                LIMIT :limit_sparse
-            """)
-            sparse_rows = (await db.execute(
-                sparse_sql,
-                {
-                    "query": query,
-                    "workspace_id": workspace_id,
-                    "active_gen_ids": active_gen_ids,
-                    "limit_sparse": limit_sparse,
-                },
-            )).mappings().all()
+                raw_sparse = (await db.execute(stmt_sparse)).mappings().all()
+                import re
+                query_tokens = set(re.findall(r"\w+", query.lower()))
+                scored_sparse = []
+                for r in raw_sparse:
+                    c_dict = dict(r)
+                    content_lower = c_dict["content"].lower()
+                    heading_lower = (c_dict["section_heading"] or "").lower()
+                    matches = sum(1 for tok in query_tokens if tok in content_lower or tok in heading_lower)
+                    c_dict["sparse_score"] = float(matches)
+                    scored_sparse.append(c_dict)
+                scored_sparse.sort(key=lambda x: x["sparse_score"], reverse=True)
+                sparse_rows = scored_sparse[:limit_sparse]
+            else:
+                sparse_sql = text("""
+                    SELECT 
+                        c.id AS chunk_id,
+                        c.document_id,
+                        c.generation_id,
+                        d.original_filename AS document_name,
+                        c.chunk_index,
+                        c.text_content AS content,
+                        c.page_number,
+                        c.section_heading,
+                        c.token_count,
+                        ts_rank(c.tsv_content, plainto_tsquery('english', :query)) AS sparse_score
+                    FROM document_chunks c
+                    JOIN documents d ON c.document_id = d.id
+                    WHERE c.workspace_id = :workspace_id
+                      AND d.workspace_id = :workspace_id
+                      AND d.status = 'ready'
+                      AND c.generation_id = ANY(:active_gen_ids)
+                      AND d.active_generation_id = c.generation_id
+                      AND c.tsv_content @@ plainto_tsquery('english', :query)
+                    ORDER BY sparse_score DESC
+                    LIMIT :limit_sparse
+                """)
+                sparse_rows = (await db.execute(
+                    sparse_sql,
+                    {
+                        "query": query,
+                        "workspace_id": workspace_id,
+                        "active_gen_ids": active_gen_ids,
+                        "limit_sparse": limit_sparse,
+                    },
+                )).mappings().all()
             rag_sparse_retrieval_duration_seconds.observe(time.perf_counter() - t_sparse)
 
         # 4. Compute 1-indexed ranks

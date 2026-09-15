@@ -1,4 +1,4 @@
-﻿name: DevVision AI CI
+name: DevVision AI CI
 
 on:
   push:
@@ -80,6 +80,15 @@ jobs:
           REDIS_URL: redis://localhost:6379/0
         run: |
           python -m pytest tests/ -v
+
+      - name: Execute Phase 6 RAG Quality Evaluation & Production Acceptance Gates
+        working-directory: backend
+        env:
+          DATABASE_URL: postgresql+asyncpg://devvision_test:devvision_test_password@localhost:5432/devvision_test_db
+          WORKER_DATABASE_URL: postgresql+asyncpg://devvision_test:devvision_test_password@localhost:5432/devvision_test_db
+          PYTHONPATH: .
+        run: |
+          python -m evaluation.runner --check-acceptance
 
   frontend-checks:
     name: Frontend Typecheck & Production Build

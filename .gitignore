@@ -66,3 +66,8 @@ Thumbs.db
 *.swp
 *.swo
 *.log
+
+# Evaluation outputs (except versioned baselines)
+backend/evaluation/results/
+backend/benchmarks/results/
+

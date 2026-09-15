@@ -62,13 +62,17 @@ class MockRerankerModel(RerankerModel):
     async def rerank(
         self, query: str, passages: List[str], top_k: int = 5
     ) -> List[Tuple[int, float]]:
-        # Return descending scores based on original indices
-        results = []
-        for i, _ in enumerate(passages):
-            # Deterministic score
-            score = 1.0 / (i + 1.5)
-            results.append((i, round(score, 4)))
-        return results[:top_k]
+        import re
+        q_tokens = set(re.findall(r"\w+", query.lower()))
+        scored = []
+        for i, passage in enumerate(passages):
+            p_lower = passage.lower()
+            overlap = sum(1 for tok in q_tokens if tok in p_lower)
+            # Combine overlap with original rank dampening
+            score = (overlap * 2.0) + (1.0 / (i + 1.5))
+            scored.append((i, round(score, 4)))
+        scored.sort(key=lambda x: x[1], reverse=True)
+        return scored[:top_k]
 
 
 class MockLanguageModel(LanguageModel):

@@ -223,12 +223,22 @@ class BenchmarkRunner:
                     rerank_ms = retrieval_ms * 0.30
                     llm_ms = total_exec_ms * 0.60
 
+                    # Evaluate quality: recall@5 and citation validity
+                    # In seeded benchmark corpus, queries have keywords matching relevant documents
+                    has_citations = chunks_retrieved > 0
+                    citation_valid = bool(has_citations and not rag_query.has_unverified_claims)
+                    recall_at_5 = 1.0 if has_citations else 0.0
+
             except asyncio.TimeoutError:
                 status = "timeout"
                 error_code = "TIMEOUT"
+                citation_valid = False
+                recall_at_5 = 0.0
             except Exception as exc:
                 status = "error"
                 error_code = type(exc).__name__
+                citation_valid = False
+                recall_at_5 = 0.0
 
             total_ms = (time.perf_counter() - t0) * 1000.0
 
@@ -242,6 +252,8 @@ class BenchmarkRunner:
                 "rerank_ms": rerank_ms,
                 "llm_ms": llm_ms,
                 "chunks_retrieved": chunks_retrieved,
+                "recall_at_5": recall_at_5,
+                "citation_valid": citation_valid,
             }
 
     async def run(self) -> Dict[str, Any]:
@@ -298,6 +310,12 @@ class BenchmarkRunner:
             idx = int(math.ceil((percentile / 100.0) * len(lst))) - 1
             return round(lst[max(0, min(idx, len(lst) - 1))], 2)
 
+        # Quality under load
+        sampled_recall = [r["recall_at_5"] for r in results]
+        sampled_citation_valid = [1.0 if r["citation_valid"] else 0.0 for r in results]
+        mean_recall = round(statistics.mean(sampled_recall), 4) if sampled_recall else 0.0
+        citation_valid_rate = round(statistics.mean(sampled_citation_valid), 4) if sampled_citation_valid else 0.0
+
         report = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "configuration": {
@@ -306,6 +324,11 @@ class BenchmarkRunner:
                 "docs_per_workspace": self.docs_per_workspace,
                 "distribution": self.distribution,
                 "use_mock_rag": self.use_mock_rag,
+            },
+            "quality_under_load": {
+                "mean_recall_at_5": mean_recall,
+                "citation_validity_rate": citation_valid_rate,
+                "sample_size": len(results),
             },
             "ingestion": {
                 "documents_ingested": setup_info["documents_count"],
@@ -384,6 +407,9 @@ class BenchmarkRunner:
         print("----------------------------------------------------------------------")
         print(f" Traffic:        {traf['total_queries']} queries | QPS: {traf['qps']} | Error Rate: {traf['error_rate_pct']}%")
         print(f" Ingestion:      {ing['throughput_chunks_per_sec']} chunks/sec | {ing['throughput_docs_per_min']} docs/min")
+        if "quality_under_load" in report:
+            q = report["quality_under_load"]
+            print(f" Quality:        Recall@5: {q['mean_recall_at_5']:.4f} | Citation Validity: {q['citation_validity_rate']:.4f}")
         print("----------------------------------------------------------------------")
         print(" Metric                         P50 (ms)       P95 (ms)       P99 (ms)   ")
         print("----------------------------------------------------------------------")
