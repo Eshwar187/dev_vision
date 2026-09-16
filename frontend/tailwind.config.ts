@@ -39,6 +39,10 @@ export default {
         md: "calc(0.5rem - 2px)",
         sm: "calc(0.5rem - 4px)",
       },
+      fontFamily: {
+        sans: ["Inter", "-apple-system", "BlinkMacSystemFont", "Segoe UI", "Roboto", "sans-serif"],
+        mono: ["'JetBrains Mono'", "ui-monospace", "SFMono-Regular", "Menlo", "Monaco", "Consolas", "monospace"],
+      },
     },
   },
   plugins: [],
