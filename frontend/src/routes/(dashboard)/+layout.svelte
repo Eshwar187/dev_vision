@@ -80,6 +80,7 @@
         <a href="/workspaces" class="hover:text-cyan-400 transition-colors">Workspaces</a>
         <a href="/documents" class="hover:text-cyan-400 transition-colors">Documents</a>
         <a href="/rag" class="hover:text-cyan-400 transition-colors">RAG Assistant</a>
+        <a href="/codebases" class="hover:text-cyan-400 transition-colors">Codebases</a>
         <a href="/" class="text-slate-400 hover:text-slate-200 transition-colors">Diagnostics</a>
       </nav>
 

@@ -1,6 +1,7 @@
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 from app.core.database import Base, get_db
@@ -11,6 +12,7 @@ import app.modules.identity.models  # noqa: F401
 import app.modules.workspaces.models  # noqa: F401
 import app.modules.documents.models  # noqa: F401
 import app.modules.rag.models  # noqa: F401
+import app.modules.codebase.models  # noqa: F401
 
 
 # In-memory SQLite async test database
@@ -50,6 +52,7 @@ async def init_test_db():
         await conn.run_sync(Base.metadata.create_all)
     yield
     async with test_engine.begin() as conn:
+        await conn.execute(text("PRAGMA foreign_keys=OFF;"))
         await conn.run_sync(Base.metadata.drop_all)
 
 

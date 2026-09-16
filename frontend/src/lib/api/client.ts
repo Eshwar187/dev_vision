@@ -14,6 +14,14 @@ import type {
   RagHistoryResponse,
   DocumentChunksResponse,
   ReindexResponse,
+  CodebaseItem,
+  CodebaseCreateRequest,
+  CodebaseListResponse,
+  CodebaseGenerationResponse,
+  CodebaseFileListResponse,
+  CodebaseSymbolListResponse,
+  CodebaseSearchResponse,
+  CodebaseQueryResponse,
 } from "./types";
 
 export interface LiveStatus {
@@ -472,6 +480,115 @@ export class ApiClient {
   ): Promise<ProbeResult<DocumentChunksResponse>> {
     return this.request<DocumentChunksResponse>(
       `/api/v1/workspaces/${workspaceId}/documents/${documentId}/chunks`
+    );
+  }
+
+  // --- Phase 7: Codebase Intelligence Methods ---
+  async listCodebases(workspaceId: string): Promise<ProbeResult<CodebaseListResponse>> {
+    return this.request<CodebaseListResponse>(`/api/v1/workspaces/${workspaceId}/codebases`);
+  }
+
+  async createCodebase(
+    workspaceId: string,
+    payload: CodebaseCreateRequest
+  ): Promise<ProbeResult<CodebaseItem>> {
+    return this.request<CodebaseItem>(`/api/v1/workspaces/${workspaceId}/codebases`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+  }
+
+  async getCodebase(
+    workspaceId: string,
+    codebaseId: string
+  ): Promise<ProbeResult<CodebaseItem>> {
+    return this.request<CodebaseItem>(`/api/v1/workspaces/${workspaceId}/codebases/${codebaseId}`);
+  }
+
+  async deleteCodebase(
+    workspaceId: string,
+    codebaseId: string
+  ): Promise<ProbeResult<null>> {
+    return this.request<null>(`/api/v1/workspaces/${workspaceId}/codebases/${codebaseId}`, {
+      method: "DELETE",
+    });
+  }
+
+  async uploadCodebaseArchive(
+    workspaceId: string,
+    codebaseId: string,
+    file: File
+  ): Promise<ProbeResult<CodebaseGenerationResponse>> {
+    const formData = new FormData();
+    formData.append("file", file);
+
+    return this.request<CodebaseGenerationResponse>(
+      `/api/v1/workspaces/${workspaceId}/codebases/${codebaseId}/upload`,
+      {
+        method: "POST",
+        body: formData,
+      }
+    );
+  }
+
+  async getCodebaseStatus(
+    workspaceId: string,
+    codebaseId: string
+  ): Promise<ProbeResult<CodebaseGenerationResponse[]>> {
+    return this.request<CodebaseGenerationResponse[]>(
+      `/api/v1/workspaces/${workspaceId}/codebases/${codebaseId}/status`
+    );
+  }
+
+  async listCodebaseFiles(
+    workspaceId: string,
+    codebaseId: string,
+    limit: number = 100
+  ): Promise<ProbeResult<CodebaseFileListResponse>> {
+    return this.request<CodebaseFileListResponse>(
+      `/api/v1/workspaces/${workspaceId}/codebases/${codebaseId}/files?limit=${limit}`
+    );
+  }
+
+  async listCodebaseSymbols(
+    workspaceId: string,
+    codebaseId: string,
+    symbolName?: string,
+    limit: number = 100
+  ): Promise<ProbeResult<CodebaseSymbolListResponse>> {
+    const url = symbolName
+      ? `/api/v1/workspaces/${workspaceId}/codebases/${codebaseId}/symbols?symbol_name=${encodeURIComponent(symbolName)}&limit=${limit}`
+      : `/api/v1/workspaces/${workspaceId}/codebases/${codebaseId}/symbols?limit=${limit}`;
+    return this.request<CodebaseSymbolListResponse>(url);
+  }
+
+  async searchCodebase(
+    workspaceId: string,
+    codebaseId: string,
+    query: string,
+    topK: number = 10
+  ): Promise<ProbeResult<CodebaseSearchResponse>> {
+    return this.request<CodebaseSearchResponse>(
+      `/api/v1/workspaces/${workspaceId}/codebases/${codebaseId}/search`,
+      {
+        method: "POST",
+        body: JSON.stringify({ query, top_k: topK }),
+      }
+    );
+  }
+
+  async queryCodebase(
+    workspaceId: string,
+    codebaseId: string,
+    query: string,
+    topK: number = 8
+  ): Promise<ProbeResult<CodebaseQueryResponse>> {
+    return this.request<CodebaseQueryResponse>(
+      `/api/v1/workspaces/${workspaceId}/codebases/${codebaseId}/query`,
+      {
+        method: "POST",
+        body: JSON.stringify({ query, top_k: topK }),
+      }
     );
   }
 }

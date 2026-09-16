@@ -146,3 +146,119 @@ export interface ReindexResponse {
   status: string;
   message: string;
 }
+
+// --- Phase 7: Codebase Intelligence & Code RAG Types ---
+export interface CodebaseItem {
+  id: string;
+  workspace_id: string;
+  name: string;
+  repository_url: string | null;
+  default_branch: string;
+  active_generation_id: string | null;
+  is_indexed: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CodebaseCreateRequest {
+  name: string;
+  repository_url?: string;
+  default_branch?: string;
+}
+
+export interface CodebaseListResponse {
+  items: CodebaseItem[];
+  total: number;
+}
+
+export interface CodebaseGenerationResponse {
+  id: string;
+  codebase_id: string;
+  workspace_id: string;
+  generation_number: number;
+  status: "building" | "active" | "retired" | "failed";
+  pipeline_version: string;
+  embedding_model_revision: string;
+  commit_hash: string | null;
+  branch: string | null;
+  total_files: number;
+  total_symbols: number;
+  total_chunks: number;
+  error_message: string | null;
+  activated_at: string | null;
+  retired_at: string | null;
+  created_at: string;
+}
+
+export interface CodebaseFileItem {
+  id: string;
+  generation_id: string;
+  codebase_id: string;
+  file_path: string;
+  language: string;
+  content_hash: string;
+  byte_size: number;
+  line_count: number;
+  created_at: string;
+}
+
+export interface CodebaseFileListResponse {
+  items: CodebaseFileItem[];
+  total: number;
+  next_cursor: string | null;
+}
+
+export interface CodebaseSymbolItem {
+  id: string;
+  generation_id: string;
+  file_id: string;
+  name: string;
+  symbol_type: string;
+  parent_symbol_id: string | null;
+  start_line: number;
+  end_line: number;
+  signature: string | null;
+  docstring: string | null;
+}
+
+export interface CodebaseSymbolListResponse {
+  items: CodebaseSymbolItem[];
+  total: number;
+  next_cursor: string | null;
+}
+
+export interface CodebaseSearchResultItem {
+  chunk_id: string;
+  file_path: string;
+  language: string;
+  start_line: number;
+  end_line: number;
+  scope_path: string;
+  content: string;
+  score: number;
+  retrieval_mode: string;
+}
+
+export interface CodebaseSearchResponse {
+  results: CodebaseSearchResultItem[];
+  total: number;
+}
+
+export interface CodebaseCitationItem {
+  file_path: string;
+  start_line: number;
+  end_line: number;
+  snippet_preview: string;
+  citation_marker: string;
+}
+
+export interface CodebaseQueryResponse {
+  id: string;
+  query: string;
+  answer: string;
+  citations: CodebaseCitationItem[];
+  retrieval_strategy: string;
+  latency_ms: number;
+  generation_id: string;
+  created_at: string;
+}
