@@ -1,4 +1,4 @@
-﻿"""
+"""
 Dedicated Integration Test Suite for Real PostgreSQL + pgvector.
 
 Validates:
@@ -24,14 +24,11 @@ import pytest_asyncio
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 
-TEST_DATABASE_URL = os.getenv(
-    "TEST_DATABASE_URL",
-    os.getenv("DATABASE_URL", "postgresql+asyncpg://postgres:postgres@localhost:5432/devvision_test")
-)
+TEST_DATABASE_URL = os.getenv("TEST_DATABASE_URL")
 
 # Detect if live PostgreSQL is reachable
 async def _is_postgres_available() -> bool:
-    if "sqlite" in TEST_DATABASE_URL:
+    if not TEST_DATABASE_URL or "sqlite" in TEST_DATABASE_URL:
         return False
     try:
         engine = create_async_engine(TEST_DATABASE_URL, pool_pre_ping=True)
@@ -42,6 +39,8 @@ async def _is_postgres_available() -> bool:
         return False
 
 def is_postgres_configured() -> bool:
+    if not TEST_DATABASE_URL:
+        return False
     import asyncio
     try:
         loop = asyncio.new_event_loop()
@@ -54,7 +53,7 @@ def is_postgres_configured() -> bool:
 POSTGRES_AVAILABLE = is_postgres_configured()
 skip_no_postgres = pytest.mark.skipif(
     not POSTGRES_AVAILABLE,
-    reason="Real PostgreSQL with pgvector extension is not reachable. Configure TEST_DATABASE_URL to run."
+    reason="PostgreSQL verification: NOT RUN -- TEST_DATABASE_URL not configured."
 )
 
 

@@ -36,6 +36,12 @@ from app.modules.rag.reranker import BgeRerankerModel
 logger = structlog.get_logger(__name__)
 
 
+# Constants for Query Pin Lifecycle
+INITIAL_TTL: int = 300  # 5 minutes
+HEARTBEAT_INTERVAL: int = 60  # 60 seconds
+MAX_QUERY_LIFETIME: int = 900  # 15 minutes absolute maximum lifetime
+
+
 class CodebaseService:
     def __init__(
         self,
@@ -352,37 +358,43 @@ class CodebaseService:
 
         pinned_gen_id = cb.active_generation_id
 
-        # Step 2: Create Active Query Pin
+        # Step 2: Create Active Query Pin (Initial TTL = 5m)
         query_id = uuid.uuid4()
-        pin = CodebaseActiveQueryPin(
-            generation_id=pinned_gen_id,
-            codebase_id=codebase_id,
+        pin = await self.acquire_query_pin(
+            session=session,
             workspace_id=workspace_id,
+            codebase_id=codebase_id,
+            generation_id=pinned_gen_id,
             query_id=query_id,
-            heartbeat_at=datetime.now(timezone.utc),
-            expires_at=datetime.fromtimestamp(time.time() + 300, tz=timezone.utc),  # 5 minutes TTL
+            ttl_seconds=INITIAL_TTL,
         )
-        session.add(pin)
-        await session.flush()
 
         try:
-            # Step 3: Dense + Sparse + RRF + Rerank
+            # Checkpoint 1: Verify Pin before dense retrieval
+            await self._verify_pin(session, query_id)
             dense_candidates = await self.retriever.retrieve_dense(
                 session, workspace_id, pinned_gen_id, query, limit=50
             )
+
+            # Checkpoint 2: Verify Pin before sparse retrieval
+            await self._verify_pin(session, query_id)
             sparse_candidates = await self.retriever.retrieve_sparse(
                 session, workspace_id, pinned_gen_id, query, limit=50
             )
 
+            # Checkpoint 3: Verify Pin before RRF fusion
+            await self._verify_pin(session, query_id)
             fused_candidates = self.retriever.fuse_rrf(
                 dense_candidates, sparse_candidates, k=60, top_k=40
             )
 
+            # Checkpoint 4: Verify Pin before reranking
+            await self._verify_pin(session, query_id)
             final_candidates = await self.retriever.rerank(
                 query, fused_candidates, threshold=0.25, top_k=top_k
             )
 
-            # Step 4: Verify Pin Liveness before LLM
+            # Checkpoint 5: Verify Pin before LLM generation
             await self._verify_pin(session, query_id)
 
             # Step 5: LLM Context Assembly & Generation
@@ -410,6 +422,9 @@ class CodebaseService:
             validation = CodeCitationValidator.validate_and_filter(
                 answer, len(final_candidates)
             )
+
+            # Checkpoint 6: Verify Pin before final citation persistence
+            await self._verify_pin(session, query_id)
 
             # Fetch generation snapshot info
             gen_stmt = select(CodebaseIndexGeneration).where(CodebaseIndexGeneration.id == pinned_gen_id)
@@ -470,7 +485,7 @@ class CodebaseService:
         codebase_id: uuid.UUID,
         generation_id: uuid.UUID,
         query_id: uuid.UUID,
-        ttl_seconds: int = 300,
+        ttl_seconds: int = INITIAL_TTL,
     ) -> CodebaseActiveQueryPin:
         # Verify target generation exists
         gen_stmt = select(CodebaseIndexGeneration).where(
@@ -482,13 +497,15 @@ class CodebaseService:
         if not gen:
             raise EntityNotFoundException(f"Generation {generation_id} not found.")
 
+        now = datetime.now(timezone.utc)
         pin = CodebaseActiveQueryPin(
             query_id=query_id,
             generation_id=generation_id,
             codebase_id=codebase_id,
             workspace_id=workspace_id,
-            heartbeat_at=datetime.now(timezone.utc),
-            expires_at=datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds),
+            created_at=now,
+            heartbeat_at=now,
+            expires_at=now + timedelta(seconds=ttl_seconds),
         )
         session.add(pin)
         await session.flush()
@@ -498,14 +515,26 @@ class CodebaseService:
         self,
         session: AsyncSession,
         query_id: uuid.UUID,
-        extension_seconds: int = 300,
+        extension_seconds: int = INITIAL_TTL,
     ) -> bool:
         pin_stmt = select(CodebaseActiveQueryPin).where(CodebaseActiveQueryPin.query_id == query_id)
         pin = (await session.execute(pin_stmt)).scalar_one_or_none()
-        if not pin or pin.expires_at < datetime.now(timezone.utc):
+        if not pin:
             return False
-        pin.heartbeat_at = datetime.now(timezone.utc)
-        pin.expires_at = datetime.now(timezone.utc) + timedelta(seconds=extension_seconds)
+
+        now = datetime.now(timezone.utc)
+        pin_exp = pin.expires_at if pin.expires_at.tzinfo else pin.expires_at.replace(tzinfo=timezone.utc)
+        if pin_exp < now:
+            return False
+
+        pin_created = pin.created_at if pin.created_at.tzinfo else pin.created_at.replace(tzinfo=timezone.utc)
+        absolute_deadline = pin_created + timedelta(seconds=MAX_QUERY_LIFETIME)
+        if now >= absolute_deadline:
+            return False
+
+        pin.heartbeat_at = now
+        new_expires_at = now + timedelta(seconds=extension_seconds)
+        pin.expires_at = min(new_expires_at, absolute_deadline)
         await session.flush()
         return True
 
@@ -522,8 +551,18 @@ class CodebaseService:
     async def _verify_pin(self, session: AsyncSession, query_id: uuid.UUID) -> None:
         pin_stmt = select(CodebaseActiveQueryPin).where(CodebaseActiveQueryPin.query_id == query_id)
         pin = (await session.execute(pin_stmt)).scalar_one_or_none()
-        if not pin or pin.expires_at < datetime.now(timezone.utc):
+        if not pin:
             raise ValidationException("Query pin expired or lost during retrieval. Aborting query.")
+
+        now = datetime.now(timezone.utc)
+        pin_exp = pin.expires_at if pin.expires_at.tzinfo else pin.expires_at.replace(tzinfo=timezone.utc)
+        if pin_exp < now:
+            raise ValidationException("Query pin expired or lost during retrieval. Aborting query.")
+
+        pin_created = pin.created_at if pin.created_at.tzinfo else pin.created_at.replace(tzinfo=timezone.utc)
+        absolute_deadline = pin_created + timedelta(seconds=MAX_QUERY_LIFETIME)
+        if now >= absolute_deadline:
+            raise ValidationException("Query lifetime exceeded maximum limit (15 minutes). Aborting query.")
 
     # -------------------------------------------------------------------------
     # Garbage Collection for Obsolete Generations
@@ -569,6 +608,7 @@ class CodebaseService:
                         )
                     ),
                 )
+                .with_for_update(skip_locked=True)
             )
 
         candidate_ids = (await session.execute(candidates_stmt)).scalars().all()
