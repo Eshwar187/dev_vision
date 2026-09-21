@@ -127,6 +127,19 @@ class Settings(BaseSettings):
     RATE_LIMIT_UPLOADS_PER_MINUTE: int = 10
     RATE_LIMIT_REINDEX_PER_MINUTE: int = 5
 
+    # GitHub App Integration (Phase 8)
+    GITHUB_APP_ID: Optional[str] = None
+    GITHUB_APP_CLIENT_ID: Optional[str] = None
+    GITHUB_APP_CLIENT_SECRET: Optional[str] = None
+    GITHUB_APP_PRIVATE_KEY: Optional[str] = None
+    GITHUB_APP_SLUG: Optional[str] = "devvision-ai"
+    GITHUB_REDIRECT_URI: Optional[str] = None
+    GITHUB_MAX_COMPRESSED_TARBALL_BYTES: int = 100 * 1024 * 1024  # 100 MB
+    GITHUB_MAX_UNCOMPRESSED_BYTES: int = 500 * 1024 * 1024  # 500 MB
+    GITHUB_MAX_ARCHIVE_FILE_COUNT: int = 10_000
+    GITHUB_MAX_SINGLE_FILE_SIZE_BYTES: int = 5 * 1024 * 1024  # 5 MB
+    GITHUB_OAUTH_STATE_EXPIRE_SECONDS: int = 600  # 10 minutes
+
     # Logging
     LOG_LEVEL: str = "INFO"
     LOG_FORMAT: str = "json"  # "json" or "console"

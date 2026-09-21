@@ -62,6 +62,30 @@ class ExternalServiceException(AppException):
         )
 
 
+class ConflictException(AppException):
+    """Raised when a resource conflict occurs (HTTP 409)."""
+
+    def __init__(self, message: str = "Resource conflict.", details: Optional[Dict[str, Any]] = None):
+        super().__init__(
+            message=message,
+            code="CONFLICT",
+            status_code=status.HTTP_409_CONFLICT,
+            details=details,
+        )
+
+
+class ForbiddenException(AppException):
+    """Raised when an operation is forbidden (HTTP 403)."""
+
+    def __init__(self, message: str = "Forbidden.", details: Optional[Dict[str, Any]] = None):
+        super().__init__(
+            message=message,
+            code="FORBIDDEN",
+            status_code=status.HTTP_403_FORBIDDEN,
+            details=details,
+        )
+
+
 # ==============================================================================
 # Phase 1: Authentication & Workspace Governance Exceptions
 # ==============================================================================

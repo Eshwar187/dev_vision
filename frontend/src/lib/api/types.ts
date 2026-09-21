@@ -262,3 +262,86 @@ export interface CodebaseQueryResponse {
   generation_id: string;
   created_at: string;
 }
+
+// ----------------------------------------------------------------------------
+// Phase 8: GitHub Integration Types
+// ----------------------------------------------------------------------------
+
+export interface GitHubConnectInitResponse {
+  authorization_url: string;
+  state: string;
+  expires_at: string;
+}
+
+export interface GitHubInstallation {
+  id: string;
+  workspace_id: string;
+  installation_id: number;
+  account_login: string;
+  account_id: number;
+  account_type: "User" | "Organization";
+  installer_github_user_login: string;
+  created_at: string;
+}
+
+export interface GitHubInstallationListResponse {
+  items: GitHubInstallation[];
+}
+
+export interface GitHubDiscoveredRepo {
+  github_repo_id: number;
+  name: string;
+  full_name: string;
+  default_branch: string;
+  is_private: boolean;
+  is_archived: boolean;
+  attachment_status: "unattached" | "attached_to_this_workspace" | "unavailable";
+  installation_id: number;
+  installation_account: string;
+}
+
+export interface GitHubDiscoveredRepoListResponse {
+  items: GitHubDiscoveredRepo[];
+}
+
+export interface GitHubRepoAttachRequest {
+  github_repo_id: number;
+}
+
+export interface GitHubRepositorySummary {
+  id: string;
+  workspace_id: string;
+  codebase_id: string;
+  github_installation_id: string;
+  github_repo_id: number;
+  name: string;
+  full_name: string;
+  default_branch: string;
+  is_private: boolean;
+  is_archived: boolean;
+  created_at: string;
+}
+
+export interface GitHubSyncRequest {
+  ref?: string;
+  force?: boolean;
+}
+
+export interface GitHubSyncRun {
+  id: string;
+  repository_id: string;
+  workspace_id: string;
+  requested_ref: string;
+  commit_sha: string | null;
+  status: string;
+  file_count: number;
+  byte_count: number;
+  error_message: string | null;
+  created_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+}
+
+export interface GitHubSyncRunListResponse {
+  items: GitHubSyncRun[];
+}

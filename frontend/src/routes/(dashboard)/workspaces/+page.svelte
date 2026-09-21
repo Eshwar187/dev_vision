@@ -1,14 +1,20 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { page } from "$app/stores";
   import { api } from "$lib/api/client";
   import { currentUser } from "$lib/stores/auth";
   import { workspaces, activeWorkspace, fetchWorkspaces, setActiveWorkspace } from "$lib/stores/workspace";
-  import type { WorkspaceDetail, WorkspaceMember } from "$lib/api/types";
+  import type { WorkspaceDetail, WorkspaceMember, GitHubInstallation } from "$lib/api/types";
+  import RepositoryPickerModal from "$lib/components/github/RepositoryPickerModal.svelte";
 
   // State
   let selectedWsDetail: WorkspaceDetail | null = null;
   let membersList: WorkspaceMember[] = [];
+  let gitHubInstallations: GitHubInstallation[] = [];
   let isLoadingDetail = false;
+  let isLoadingGitHub = false;
+  let isConnectingGitHub = false;
+  let showRepoPickerModal = false;
   let actionMessage = "";
   let actionError = "";
 
@@ -35,21 +41,72 @@
     loadWorkspaceDetails(activeWsId);
   }
 
+  onMount(() => {
+    // Check if returning from GitHub OAuth flow
+    const urlParams = new URLSearchParams(window.location.search);
+    if (urlParams.get("github_connected") === "true") {
+      actionMessage = "GitHub App successfully authorized and connected to this workspace!";
+      // Clean up query string cleanly
+      window.history.replaceState({}, document.title, window.location.pathname);
+    }
+  });
+
   async function loadWorkspaceDetails(id: string) {
     isLoadingDetail = true;
+    isLoadingGitHub = true;
     actionError = "";
     actionMessage = "";
-    const [detailRes, membersRes] = await Promise.all([
+    const [detailRes, membersRes, githubRes] = await Promise.all([
       api.getWorkspace(id),
       api.listMembers(id),
+      api.listGitHubInstallations(id),
     ]);
     isLoadingDetail = false;
+    isLoadingGitHub = false;
 
     if (detailRes.success && detailRes.data) {
       selectedWsDetail = detailRes.data;
     }
     if (membersRes.success && membersRes.data?.members) {
       membersList = membersRes.data.members;
+    }
+    if (githubRes.success && githubRes.data?.items) {
+      gitHubInstallations = githubRes.data.items;
+    }
+  }
+
+  async function handleConnectGitHub() {
+    if (!selectedWsDetail) return;
+    isConnectingGitHub = true;
+    actionError = "";
+    actionMessage = "";
+
+    const res = await api.initGitHubConnect(selectedWsDetail.id);
+    isConnectingGitHub = false;
+
+    if (res.success && res.data) {
+      // Redirect browser to GitHub App installation / authorization URL
+      window.location.href = res.data.authorization_url;
+    } else {
+      actionError = res.error || "Failed to initialize GitHub App authorization.";
+    }
+  }
+
+  async function handleDisconnectGitHub(installationId: string, accountLogin: string) {
+    if (!selectedWsDetail) return;
+    if (!confirm(`Are you sure you want to disconnect GitHub account "${accountLogin}"? Any repositories attached via this installation will become detached.`)) {
+      return;
+    }
+
+    actionError = "";
+    actionMessage = "";
+    const res = await api.deleteGitHubInstallation(selectedWsDetail.id, installationId);
+
+    if (res.success) {
+      actionMessage = `GitHub account "${accountLogin}" disconnected successfully.`;
+      await loadWorkspaceDetails(selectedWsDetail.id);
+    } else {
+      actionError = res.error || "Failed to disconnect GitHub installation.";
     }
   }
 
@@ -381,6 +438,94 @@
             </table>
           </div>
         </div>
+
+        <!-- GitHub App Integration Section -->
+        <div class="rounded-xl border border-slate-800 bg-slate-900/40 p-6 space-y-4">
+          <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+            <div>
+              <div class="flex items-center gap-2">
+                <svg class="w-5 h-5 text-white" fill="currentColor" viewBox="0 0 24 24">
+                  <path fill-rule="evenodd" clip-rule="evenodd" d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.53 1.032 1.53 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.019 10.019 0 0022 12.017C22 6.484 17.522 2 12 2z" />
+                </svg>
+                <h3 class="text-sm font-semibold text-white">GitHub Integration</h3>
+              </div>
+              <p class="text-xs text-slate-400 mt-1">
+                Authorize DevVision GitHub App to discover and synchronize repositories into Codebase Intelligence.
+              </p>
+            </div>
+
+            <div class="flex items-center gap-2">
+              {#if gitHubInstallations.length > 0}
+                <button
+                  on:click={() => (showRepoPickerModal = true)}
+                  class="px-3 py-1.5 rounded-lg bg-cyan-600/90 hover:bg-cyan-500 text-white text-xs font-medium transition-colors flex items-center gap-1.5"
+                >
+                  <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
+                  </svg>
+                  Attach Repositories
+                </button>
+              {/if}
+
+              {#if selectedWsDetail.role === "owner" || selectedWsDetail.role === "admin"}
+                <button
+                  on:click={handleConnectGitHub}
+                  disabled={isConnectingGitHub}
+                  class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-white text-xs font-medium transition-colors flex items-center gap-1.5 disabled:opacity-50"
+                >
+                  {#if isConnectingGitHub}
+                    <div class="animate-spin rounded-full h-3 w-3 border-b-2 border-white"></div>
+                    Connecting...
+                  {:else}
+                    <svg class="w-3.5 h-3.5 text-slate-300" fill="currentColor" viewBox="0 0 24 24">
+                      <path fill-rule="evenodd" clip-rule="evenodd" d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.53 1.032 1.53 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.019 10.019 0 0022 12.017C22 6.484 17.522 2 12 2z" />
+                    </svg>
+                    Install / Connect App
+                  {/if}
+                </button>
+              {/if}
+            </div>
+          </div>
+
+          <!-- Installations List -->
+          {#if isLoadingGitHub}
+            <div class="py-6 flex items-center justify-center gap-2 text-xs text-slate-400 font-mono">
+              <div class="animate-spin rounded-full h-4 w-4 border-b-2 border-cyan-500"></div>
+              Loading connected accounts...
+            </div>
+          {:else if gitHubInstallations.length === 0}
+            <div class="py-6 border border-dashed border-slate-800 rounded-lg text-center text-xs text-slate-500">
+              No GitHub App installations connected to this workspace yet. Click "Install / Connect App" to authorize access.
+            </div>
+          {:else}
+            <div class="divide-y divide-slate-800/60 border border-slate-800/80 rounded-lg overflow-hidden bg-slate-950/40">
+              {#each gitHubInstallations as inst (inst.id)}
+                <div class="p-3.5 flex items-center justify-between gap-4">
+                  <div class="min-w-0">
+                    <div class="flex items-center gap-2">
+                      <span class="font-medium text-xs text-white">{inst.account_login}</span>
+                      <span class="px-1.5 py-0.2 rounded text-[10px] font-mono bg-slate-800 text-slate-400 border border-slate-700">
+                        {inst.account_type}
+                      </span>
+                    </div>
+                    <div class="text-[11px] text-slate-500 font-mono mt-0.5">
+                      Installation ID: {inst.installation_id} &bull; Installed by: @{inst.installer_github_user_login}
+                    </div>
+                  </div>
+
+                  {#if selectedWsDetail.role === "owner" || selectedWsDetail.role === "admin"}
+                    <button
+                      on:click={() => handleDisconnectGitHub(inst.id, inst.account_login)}
+                      class="text-xs text-rose-400 hover:text-rose-300 font-medium transition-colors"
+                    >
+                      Disconnect
+                    </button>
+                  {/if}
+                </div>
+              {/each}
+            </div>
+          {/if}
+        </div>
       {:else}
         <div class="rounded-xl border border-slate-800 bg-slate-900/30 p-12 text-center text-slate-400 text-xs">
           Select or create a workspace to view configuration and team members.
@@ -389,6 +534,18 @@
     </div>
   </div>
 </div>
+
+<!-- Modal: GitHub Repository Picker -->
+{#if selectedWsDetail}
+  <RepositoryPickerModal
+    workspaceId={selectedWsDetail.id}
+    isOpen={showRepoPickerModal}
+    on:close={() => (showRepoPickerModal = false)}
+    on:attached={(e) => {
+      actionMessage = `Repository "${e.detail.name}" attached successfully!`;
+    }}
+  />
+{/if}
 
 <!-- Modal: Create Workspace -->
 {#if showCreateModal}

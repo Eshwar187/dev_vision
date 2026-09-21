@@ -1,5 +1,6 @@
-﻿import io
+import io
 import os
+import tarfile
 import zipfile
 from dataclasses import dataclass
 from typing import Generator, List, Optional, Set, Tuple
@@ -87,6 +88,89 @@ class SecureArchiveExtractor:
         if not archive_bytes:
             raise ValidationException("Repository archive is empty.")
 
+        # Support Tarball (.tar.gz) archives for GitHub repository synchronization
+        if archive_bytes.startswith(b"\x1f\x8b") or tarfile.is_tarfile(io.BytesIO(archive_bytes)):
+            try:
+                with tarfile.open(fileobj=io.BytesIO(archive_bytes), mode="r:*") as tf:
+                    members = tf.getmembers()
+                    if len(members) > MAX_ARCHIVE_FILE_COUNT:
+                        raise ValidationException(
+                            f"Archive exceeds maximum file count limit ({MAX_ARCHIVE_FILE_COUNT} files)."
+                        )
+
+                    total_uncompressed_size = 0
+                    extracted_files: List[ExtractedSourceFile] = []
+
+                    for member in members:
+                        # 1. Reject symlinks, hardlinks, device nodes, and special entries
+                        if member.issym() or member.islnk() or member.isdev() or member.ischr() or member.isblk() or member.isfifo():
+                            continue
+
+                        # Skip directories
+                        if member.isdir() or member.name.endswith("/"):
+                            continue
+
+                        # 2. Decompression Bomb & Path Traversal Checks
+                        norm_path = os.path.normpath(member.name).replace("\\", "/")
+                        if norm_path.startswith("/") or norm_path.startswith("../") or "/../" in norm_path:
+                            raise ValidationException(f"Path traversal detected in archive entry: {member.name}")
+
+                        if ":" in norm_path:
+                            raise ValidationException(f"Invalid path with device specifier: {member.name}")
+
+                        # Strip root directory prefix (e.g. repo-main/src/foo -> src/foo)
+                        parts = norm_path.split("/")
+                        if len(parts) > 1 and (parts[0].endswith("-master") or parts[0].endswith("-main") or "-" in parts[0]):
+                            clean_path = "/".join(parts[1:])
+                        else:
+                            clean_path = norm_path
+
+                        clean_parts = clean_path.split("/")
+                        if any(part in IGNORED_DIRECTORIES for part in clean_parts):
+                            continue
+
+                        filename = clean_parts[-1]
+                        ext = os.path.splitext(filename)[1].lower()
+
+                        if ext in IGNORED_EXTENSIONS:
+                            continue
+
+                        if ext not in SUPPORTED_EXTENSIONS_MAP:
+                            continue
+
+                        if member.size > MAX_SINGLE_FILE_SIZE_BYTES:
+                            continue
+
+                        total_uncompressed_size += member.size
+                        if total_uncompressed_size > MAX_UNCOMPRESSED_ARCHIVE_SIZE_BYTES:
+                            raise ValidationException(
+                                f"Archive exceeds maximum uncompressed size ({MAX_UNCOMPRESSED_ARCHIVE_SIZE_BYTES // (1024*1024)} MB)."
+                            )
+
+                        fileobj = tf.extractfile(member)
+                        if fileobj is None:
+                            continue
+                        content = fileobj.read()
+
+                        extracted_files.append(
+                            ExtractedSourceFile(
+                                repo_relative_path=clean_path,
+                                filename=filename,
+                                extension=ext,
+                                language=SUPPORTED_EXTENSIONS_MAP[ext],
+                                byte_size=len(content),
+                                raw_content=content,
+                            )
+                        )
+
+                    if not extracted_files:
+                        raise ValidationException("Archive contains no supported source files to index.")
+
+                    return extracted_files
+            except tarfile.TarError as e:
+                raise ValidationException(f"Failed reading tar archive: {str(e)}")
+
+        # ZIP archive processing
         try:
             zf = zipfile.ZipFile(io.BytesIO(archive_bytes))
         except zipfile.BadZipFile:

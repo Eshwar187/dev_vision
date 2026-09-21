@@ -22,6 +22,15 @@ import type {
   CodebaseSymbolListResponse,
   CodebaseSearchResponse,
   CodebaseQueryResponse,
+  GitHubConnectInitResponse,
+  GitHubInstallation,
+  GitHubInstallationListResponse,
+  GitHubDiscoveredRepo,
+  GitHubDiscoveredRepoListResponse,
+  GitHubRepositorySummary,
+  GitHubSyncRequest,
+  GitHubSyncRun,
+  GitHubSyncRunListResponse,
 } from "./types";
 
 export interface LiveStatus {
@@ -589,6 +598,105 @@ export class ApiClient {
         method: "POST",
         body: JSON.stringify({ query, top_k: topK }),
       }
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // Phase 8: GitHub Integration & Repository Synchronization
+  // ---------------------------------------------------------------------------
+  async initGitHubConnect(
+    workspaceId: string
+  ): Promise<ProbeResult<GitHubConnectInitResponse>> {
+    return this.request<GitHubConnectInitResponse>(
+      `/api/v1/workspaces/${workspaceId}/github/connect/init`,
+      {
+        method: "POST",
+      }
+    );
+  }
+
+  async listGitHubInstallations(
+    workspaceId: string
+  ): Promise<ProbeResult<GitHubInstallationListResponse>> {
+    return this.request<GitHubInstallationListResponse>(
+      `/api/v1/workspaces/${workspaceId}/github/installations`
+    );
+  }
+
+  async deleteGitHubInstallation(
+    workspaceId: string,
+    installationId: string
+  ): Promise<ProbeResult<{ message: string }>> {
+    return this.request<{ message: string }>(
+      `/api/v1/workspaces/${workspaceId}/github/installations/${installationId}`,
+      {
+        method: "DELETE",
+      }
+    );
+  }
+
+  async discoverGitHubRepositories(
+    workspaceId: string
+  ): Promise<ProbeResult<GitHubDiscoveredRepoListResponse>> {
+    return this.request<GitHubDiscoveredRepoListResponse>(
+      `/api/v1/workspaces/${workspaceId}/github/repositories`
+    );
+  }
+
+  async attachGitHubRepository(
+    workspaceId: string,
+    githubRepoId: number
+  ): Promise<ProbeResult<GitHubRepositorySummary>> {
+    return this.request<GitHubRepositorySummary>(
+      `/api/v1/workspaces/${workspaceId}/github/repositories/attach`,
+      {
+        method: "POST",
+        body: JSON.stringify({ github_repo_id: githubRepoId }),
+      }
+    );
+  }
+
+  async getGitHubRepositoryByCodebase(
+    workspaceId: string,
+    codebaseId: string
+  ): Promise<ProbeResult<GitHubRepositorySummary | null>> {
+    return this.request<GitHubRepositorySummary | null>(
+      `/api/v1/workspaces/${workspaceId}/github/repositories/by-codebase/${codebaseId}`
+    );
+  }
+
+  async detachGitHubRepository(
+    workspaceId: string,
+    repoId: string
+  ): Promise<ProbeResult<{ message: string }>> {
+    return this.request<{ message: string }>(
+      `/api/v1/workspaces/${workspaceId}/github/repositories/${repoId}`,
+      {
+        method: "DELETE",
+      }
+    );
+  }
+
+  async triggerGitHubSync(
+    workspaceId: string,
+    repoId: string,
+    payload: GitHubSyncRequest = {}
+  ): Promise<ProbeResult<GitHubSyncRun>> {
+    return this.request<GitHubSyncRun>(
+      `/api/v1/workspaces/${workspaceId}/github/repositories/${repoId}/sync`,
+      {
+        method: "POST",
+        body: JSON.stringify(payload),
+      }
+    );
+  }
+
+  async listGitHubSyncRuns(
+    workspaceId: string,
+    repoId: string
+  ): Promise<ProbeResult<GitHubSyncRunListResponse>> {
+    return this.request<GitHubSyncRunListResponse>(
+      `/api/v1/workspaces/${workspaceId}/github/repositories/${repoId}/syncs`
     );
   }
 }
