@@ -27,14 +27,17 @@ dev-vision/
 │   │   ├── modules/            # Isolated domain packages
 │   │   │   ├── identity/       # Users, Sessions, Argon2id, Anti-enumeration
 │   │   │   ├── workspaces/     # Workspaces, Memberships, RBAC, Ownership transfer
-│   │   │   └── documents/      # Validation, S3 storage, Checksums, Dedup, Cursor pagination
+│   │   │   ├── documents/      # Validation, S3 storage, Checksums, Dedup, Cursor pagination
+│   │   │   ├── rag/            # Multi-strategy hybrid search, Reciprocal Rank Fusion, grounded QA
+│   │   │   ├── codebase/       # Tree-sitter AST symbol indexing, immutable generation lifecycle, citations
+│   │   │   └── github/         # PKCE S256 OAuth, app installations, exclusivity, archive sync
 │   │   └── main.py             # ASGI factory, lifespan, CORS, middleware
 │   ├── migrations/             # Alembic migrations (async SQLAlchemy)
-│   └── tests/                  # Pytest unit & integration suite (53 tests)
+│   └── tests/                  # Pytest unit, integration & postgres suite (180+ tests)
 ├── frontend/                   # SvelteKit Application
 │   ├── src/
-│   │   ├── lib/                # API client with CSRF double-submit, stores, types
-│   │   └── routes/             # SvelteKit pages: (auth)/login, (auth)/register, (dashboard)/app, (dashboard)/workspaces, (dashboard)/documents
+│   │   ├── lib/                # API client with CSRF double-submit, stores, types, components
+│   │   └── routes/             # SvelteKit pages: (auth)/login, (auth)/register, (dashboard)/app, (dashboard)/workspaces, (dashboard)/documents, (dashboard)/codebases, (dashboard)/rag
 │   └── static/
 ├── docker-compose.yml          # Complete multi-container local stack
 ├── .env.example                # Canonical environment template
@@ -237,6 +240,28 @@ npm run build
 - `GET /{id}`: Retrieve document metadata.
 - `GET /{id}/download`: Stream binary document file from S3 through authenticated FastAPI proxy.
 - `DELETE /{id}`: Delete document using S3-first deletion flow and RBAC rules (owner/admin deletes any, member deletes own).
+
+### Codebase Intelligence (`/api/v1/workspaces/{workspace_id}/codebases`)
+- `POST /`: Create codebase record with default branch.
+- `GET /`: List all codebases in the workspace.
+- `GET /{id}`: Retrieve codebase details and active generation status.
+- `POST /{id}/upload`: Ingest repository archive (.zip or .tar.gz), parse AST with Tree-sitter, index symbols, and activate generation atomically.
+- `GET /{id}/files`: Browse indexed codebase files with pagination.
+- `GET /{id}/symbols`: Search and explore Tree-sitter extracted symbols, types, and functions.
+- `POST /{id}/search`: Dense vector search across indexed codebase chunks.
+- `POST /{id}/query`: Grounded natural-language Codebase Q&A with deterministic citations and query pin protection.
+- `DELETE /{id}`: Delete codebase and cascade delete generations, symbols, chunks, and leases.
+
+### GitHub Integration (`/api/v1/workspaces/{workspace_id}/github`)
+- `POST /connect/init`: Initiate GitHub App OAuth with RFC 7636 PKCE S256 and HMAC-signed state token.
+- `GET /installations`: List connected GitHub App installations for this workspace.
+- `DELETE /installations/{installation_id}`: Disconnect GitHub App installation.
+- `GET /repositories`: Discover accessible GitHub repositories across workspace installations.
+- `POST /repositories/attach`: Attach repository under global uniqueness (`UNIQUE(github_repo_id)`).
+- `GET /repositories/by-codebase/{codebase_id}`: Fetch attached GitHub repository for a codebase.
+- `POST /repositories/{repo_id}/sync`: Trigger asynchronous or synchronous repository sync run.
+- `GET /repositories/{repo_id}/syncs`: List historical synchronization runs with commit SHAs and statuses.
+- `DELETE /repositories/{repo_id}`: Detach GitHub repository and delete associated codebase.
 
 ### Diagnostics & Probes
 - `GET /health/live`: Shallow liveness probe.
